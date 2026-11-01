@@ -1,3 +1,4 @@
+import Darwin
 import ExplorerCore
 import Foundation
 import SwiftUI
@@ -54,8 +55,19 @@ struct FileOperation: Identifiable {
     var currentItem: String?
     var state: FileOperationState = .queued
     var error: String?
+    var totalBytes: Int64?
+    var completedBytes: Int64 = 0
+    var bytesPerSecond: Double?
+    var estimatedSecondsRemaining: TimeInterval?
+    var isPaused = false
+    var canPause = false
+    var isVerifying = false
+    var verificationEnabled = false
 
     var progress: Double? {
+        if let totalBytes, totalBytes > 0 {
+            return min(max(Double(completedBytes) / Double(totalBytes), 0), 1)
+        }
         guard total > 0 else { return nil }
         return min(max(Double(completed) / Double(total), 0), 1)
     }
@@ -103,6 +115,7 @@ final class FileOperationQueue: ObservableObject {
         let kind: FileOperationKind
         let destination: URL
         let total: Int
+        let verify: Bool
         let work: JobWork
         let completion: (TransferOutcome) -> Void
     }
@@ -110,6 +123,7 @@ final class FileOperationQueue: ObservableObject {
     private var pending: [Job] = []
     private var activeID: UUID?
     private var activeTask: Task<Void, Never>?
+    private var activeCopy: TransferCopySession?
     private var cancelledIDs = Set<UUID>()
     private var conflictPolicies: [UUID: ConflictChoice] = [:]
 
@@ -117,6 +131,7 @@ final class FileOperationQueue: ObservableObject {
         sources: [URL],
         destination: URL,
         isMove: Bool,
+        verify: Bool = false,
         completion: @escaping (TransferOutcome) -> Void
     ) {
         let sources = sources.map(\.standardizedFileURL)
@@ -134,11 +149,13 @@ final class FileOperationQueue: ObservableObject {
             total: sources.count
         )
         operations.append(operation)
+        update(id) { $0.verificationEnabled = verify }
         pending.append(Job(
             id: id,
             kind: kind,
             destination: destination.standardizedFileURL,
             total: sources.count,
+            verify: verify,
             work: .transfer(sources: sources),
             completion: completion
         ))
@@ -169,6 +186,7 @@ final class FileOperationQueue: ObservableObject {
             kind: kind,
             destination: destination.standardizedFileURL,
             total: 1,
+            verify: false,
             work: kind == .compress ? .compress(source: source) : .extract(archive: source),
             completion: completion
         ))
@@ -191,12 +209,31 @@ final class FileOperationQueue: ObservableObject {
             self.conflict = nil
             conflict.continuation.resume(returning: .skip)
         }
-        if activeID == id,
-           let operation = operations.first(where: { $0.id == id }),
-           operation.kind == .compress || operation.kind == .extract {
-            ArchiveService.cancelActiveArchive()
+        if activeID == id {
+            activeCopy?.cancel()
+            if let operation = operations.first(where: { $0.id == id }),
+               operation.kind == .compress || operation.kind == .extract {
+                ArchiveService.cancelActiveArchive()
+            }
         }
+    }
 
+    func pause(_ id: UUID) {
+        guard id == activeID, let activeCopy, !activeCopy.isPaused else { return }
+        activeCopy.pause()
+        update(id) { operation in
+            operation.isPaused = true
+            operation.bytesPerSecond = 0
+            operation.estimatedSecondsRemaining = nil
+        }
+    }
+
+    func resume(_ id: UUID) {
+        guard id == activeID, let activeCopy, activeCopy.isPaused else { return }
+        activeCopy.resume()
+        update(id) { operation in
+            operation.isPaused = false
+        }
     }
 
     func resolveConflict(_ choice: ConflictChoice, applyToAll: Bool) {
@@ -279,7 +316,45 @@ final class FileOperationQueue: ObservableObject {
                 finish()
                 return
             }
-            for source in sources {
+
+            let sourceBytes = await Task.detached(priority: .utility) {
+                sources.map { TransferMetrics.totalLogicalBytes(at: $0) }
+            }.value
+            let totalBytes = sourceBytes.reduce(into: Int64(0)) { $0 += $1 }
+            if totalBytes > 0 {
+                update(job.id) { $0.totalBytes = totalBytes }
+            }
+
+            var completedBytes: Int64 = 0
+            var lastSampleTime = Date()
+            var lastSampleBytes: Int64 = 0
+            var smoothedSpeed: Double = 0
+
+            func report(_ bytes: Int64) {
+                let clamped = totalBytes > 0 ? min(max(bytes, 0), totalBytes) : max(bytes, 0)
+                let now = Date()
+                let elapsed = now.timeIntervalSince(lastSampleTime)
+                if elapsed >= 0.15 {
+                    let delta = max(0, clamped - lastSampleBytes)
+                    let instantaneous = Double(delta) / elapsed
+                    smoothedSpeed = smoothedSpeed == 0
+                        ? instantaneous
+                        : (smoothedSpeed * 0.7 + instantaneous * 0.3)
+                    lastSampleTime = now
+                    lastSampleBytes = clamped
+                }
+                let eta: TimeInterval? = {
+                    guard totalBytes > clamped, smoothedSpeed > 1 else { return nil }
+                    return Double(totalBytes - clamped) / smoothedSpeed
+                }()
+                update(job.id) { operation in
+                    operation.completedBytes = clamped
+                    operation.bytesPerSecond = smoothedSpeed > 0 ? smoothedSpeed : nil
+                    operation.estimatedSecondsRemaining = eta
+                }
+            }
+
+            for (index, source) in sources.enumerated() {
                 if cancelledIDs.contains(job.id) {
                     wasCancelled = true
                     break
@@ -290,6 +365,8 @@ final class FileOperationQueue: ObservableObject {
 
                 if job.kind == .move &&
                     source.deletingLastPathComponent().standardizedFileURL.path == job.destination.path {
+                    completedBytes += sourceBytes[index]
+                    report(completedBytes)
                     update(job.id) { $0.completed += 1 }
                     continue
                 }
@@ -306,6 +383,8 @@ final class FileOperationQueue: ObservableObject {
                         }
                         switch choice {
                         case .skip:
+                            completedBytes += sourceBytes[index]
+                            report(completedBytes)
                             update(job.id) { $0.completed += 1 }
                             continue
                         case .keepBoth:
@@ -317,6 +396,8 @@ final class FileOperationQueue: ObservableObject {
                                 }.value
                             } catch {
                                 failures.append("\(target.lastPathComponent): \(error.localizedDescription)")
+                                completedBytes += sourceBytes[index]
+                                report(completedBytes)
                                 update(job.id) { $0.completed += 1 }
                                 continue
                             }
@@ -324,22 +405,101 @@ final class FileOperationQueue: ObservableObject {
                     }
                 }
 
-                do {
-                    let isMove = job.kind == .move
-                    try await Task.detached(priority: .userInitiated) {
-                        if isMove {
+                let isMove = job.kind == .move
+                let sameVolume = isMove && isSameVolume(source, target.deletingLastPathComponent())
+                if sameVolume {
+                    do {
+                        try await Task.detached(priority: .userInitiated) {
                             try FileManager.default.moveItem(at: source, to: target)
-                        } else {
-                            try FileManager.default.copyItem(at: source, to: target)
+                        }.value
+                        created.append(target)
+                        pairs.append(TransferPair(source: source, target: target))
+                        completedBytes += sourceBytes[index]
+                        report(completedBytes)
+                        update(job.id) { $0.completed += 1 }
+                    } catch {
+                        failures.append("\(source.lastPathComponent): \(error.localizedDescription)")
+                        completedBytes += sourceBytes[index]
+                        report(completedBytes)
+                        update(job.id) { $0.completed += 1 }
+                    }
+                    continue
+                }
+
+                let session = TransferCopySession(
+                    source: source,
+                    target: target,
+                    totalBytes: sourceBytes[index],
+                    verifyAfterCopy: job.verify
+                )
+                activeCopy = session
+                update(job.id) { operation in
+                    operation.canPause = true
+                    operation.verificationEnabled = job.verify
+                    operation.isPaused = false
+                    operation.isVerifying = false
+                }
+                let completedBefore = completedBytes
+
+                do {
+                    try await session.start(
+                        onProgress: { copied in
+                            completedBytes = completedBefore + min(copied, max(sourceBytes[index], 0))
+                            report(completedBytes)
+                        },
+                        onVerification: { verifying in
+                            self.update(job.id) { operation in
+                                operation.isVerifying = verifying
+                                operation.canPause = !verifying
+                                if verifying {
+                                    operation.bytesPerSecond = nil
+                                    operation.estimatedSecondsRemaining = nil
+                                }
+                            }
                         }
-                    }.value
+                    )
+
+                    if cancelledIDs.contains(job.id) {
+                        wasCancelled = true
+                        try? FileManager.default.removeItem(at: target)
+                        break
+                    }
+
+                    if isMove {
+                        do {
+                            try await Task.detached(priority: .userInitiated) {
+                                try FileManager.default.removeItem(at: source)
+                            }.value
+                        } catch {
+                            try? FileManager.default.removeItem(at: target)
+                            throw error
+                        }
+                    }
+
                     created.append(target)
                     pairs.append(TransferPair(source: source, target: target))
+                    completedBytes = completedBefore + sourceBytes[index]
+                    report(completedBytes)
                     update(job.id) { $0.completed += 1 }
                 } catch {
-                    failures.append("\(source.lastPathComponent): \(error.localizedDescription)")
+                    try? FileManager.default.removeItem(at: target)
+                    if let copyError = error as? TransferCopyError,
+                       case .cancelled = copyError {
+                        wasCancelled = true
+                    } else {
+                        failures.append("\(source.lastPathComponent): \(error.localizedDescription)")
+                    }
+                    completedBytes += sourceBytes[index]
+                    report(completedBytes)
                     update(job.id) { $0.completed += 1 }
                 }
+                activeCopy = nil
+                update(job.id) { operation in
+                    operation.canPause = false
+                    operation.isPaused = false
+                    operation.isVerifying = false
+                }
+                if wasCancelled { break }
             }
 
         case .compress(let source):
@@ -387,6 +547,14 @@ final class FileOperationQueue: ObservableObject {
         }
     }
 
+    private func isSameVolume(_ source: URL, _ targetDirectory: URL) -> Bool {
+        var sourceStat = stat()
+        var targetStat = stat()
+        guard stat(source.path, &sourceStat) == 0,
+              stat(targetDirectory.path, &targetStat) == 0 else { return false }
+        return sourceStat.st_dev == targetStat.st_dev
+    }
+
     private func update(_ id: UUID, _ mutate: (inout FileOperation) -> Void) {
         guard let index = operations.firstIndex(where: { $0.id == id }) else { return }
         mutate(&operations[index])
@@ -424,6 +592,23 @@ struct OperationQueueOverlay: View {
                     .foregroundStyle(theme.contentText)
                     .lineLimit(1)
                 Spacer(minLength: 4)
+                if operation.state == .running, operation.canPause {
+                    Button {
+                        if operation.isPaused {
+                            queue.resume(operation.id)
+                        } else {
+                            queue.pause(operation.id)
+                        }
+                    } label: {
+                        Image(systemName: operation.isPaused ? "play.fill" : "pause.fill")
+                            .font(.system(size: 9, weight: .bold))
+                            .frame(width: 18, height: 18)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(theme.contentSecondary)
+                    .help(operation.isPaused ? "Resume" : "Pause")
+                }
                 if operation.state.isTerminal {
                     Button {
                         queue.dismiss(operation.id)
@@ -452,7 +637,7 @@ struct OperationQueueOverlay: View {
             }
 
             if operation.state == .running {
-                if operation.total > 1, let progress = operation.progress {
+                if operation.totalBytes != nil || operation.total > 1, let progress = operation.progress {
                     ProgressView(value: progress)
                         .controlSize(.small)
                         .tint(theme.accent)
@@ -461,15 +646,21 @@ struct OperationQueueOverlay: View {
                         .controlSize(.small)
                 }
                 HStack(spacing: 5) {
-                    Text(operation.currentItem ?? "Starting…")
+                    Text(operation.isVerifying ? "Verifying copied data…" : (operation.isPaused ? "Paused" : (operation.currentItem ?? "Starting…")))
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer(minLength: 4)
-                    Text("\(operation.completed) of \(operation.total)")
+                    Text(operation.totalBytes == nil ? "\(operation.completed) of \(operation.total)" : "\(Int((operation.progress ?? 0) * 100))%")
                         .monospacedDigit()
                 }
                 .font(.system(size: 9.5))
                 .foregroundStyle(theme.contentSecondary)
+                if let total = operation.totalBytes, total > 0 {
+                    Text(transferDetail(operation, total: total))
+                        .font(.system(size: 9))
+                        .foregroundStyle(theme.contentSecondary)
+                        .lineLimit(1)
+                }
             } else if operation.state == .queued {
                 Text("Waiting…")
                     .font(.system(size: 9.5))
@@ -496,6 +687,34 @@ struct OperationQueueOverlay: View {
                 .strokeBorder(theme.divider, lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+    }
+
+    private func transferDetail(_ operation: FileOperation, total: Int64) -> String {
+        var parts = [
+            "\(ByteFormat.string(operation.completedBytes)) of \(ByteFormat.string(total))"
+        ]
+        if operation.isPaused {
+            parts.append("paused")
+        } else if operation.isVerifying {
+            parts.append("verifying")
+        } else {
+            if let speed = operation.bytesPerSecond, speed > 0 {
+                parts.append("\(ByteFormat.string(Int64(speed)))/s")
+            }
+            if let eta = operation.estimatedSecondsRemaining {
+                if eta < 60 {
+                    parts.append("\(Int(eta.rounded()))s left")
+                } else if eta < 3600 {
+                    parts.append("\(Int(eta / 60))m left")
+                } else {
+                    parts.append("\(Int(eta / 3600))h left")
+                }
+            }
+        }
+        if operation.verificationEnabled && !operation.isVerifying && !operation.isPaused {
+            parts.append("verified")
+        }
+        return parts.joined(separator: " · ")
     }
 }
 

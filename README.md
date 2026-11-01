@@ -6,7 +6,7 @@
 
 <p align="center">
   A native, Windows Explorer-style file browser for macOS.<br>
-  Fast keyboard navigation, tabs and split panes, recursive search, batch rename, folder sizes, and a real command palette.
+  Fast keyboard navigation, tabs and split panes, recursive search, batch rename, folder sizes, archive browsing, user-defined actions, and a real command palette.
 </p>
 
 <p align="center">
@@ -28,7 +28,8 @@ UU Explorer is a real AppKit/SwiftUI application, not a Finder skin. It brings t
 
 - **Keyboard-first**: menu shortcuts, Space Quick Look, ⌘K command palette, and arrow-key gallery navigation.
 - **Built for large folders**: sortable details view, live filtering, recursive search, and on-demand folder sizing.
-- **Real file operations**: a cancellable operation queue with progress, conflict choices, and undo/redo.
+- **Real file operations**: a cancellable byte-aware transfer queue with pause/resume, speed, ETA, optional SHA-256 verification, conflict choices, and undo/redo.
+- **Automation without a plugin runtime**: browse archives, define shell actions, copy paths in four formats, and open locations from the `uu` CLI or a URL scheme.
 - **Native integrations**: Quick Look, Open With, Share, Terminal, Trash, Finder reveal, and mounted volumes.
 - **No account, telemetry, or bundled network service**: file browsing stays on the Mac.
 
@@ -48,6 +49,7 @@ UU Explorer is a real AppKit/SwiftUI application, not a Finder skin. It brings t
 
 - **Recursive search** from the filter field with a scope switch and a 2,000-result safety cap.
 - **Saved searches** in the sidebar, with one-click reruns.
+- **Archive browser** for ZIP, TAR, RAR, and 7-Zip contents without extracting the whole archive.
 - **Batch rename** with live preview for find/replace, prefix/suffix, or numbering.
 - **Undo/redo** for copy, move, rename, create, Trash, and supported archive operations.
 - **Folder sizes** in the Size column and selection status, plus a Storage Usage panel.
@@ -55,7 +57,12 @@ UU Explorer is a real AppKit/SwiftUI application, not a Finder skin. It brings t
 
 ### Take action
 
-- **Operation queue** with progress, cancel, and Replace / Keep Both / Skip / Apply to All conflict handling.
+- **Byte-level operation queue** with speed, ETA, pause/resume, cancel, and Replace / Keep Both / Skip / Apply to All conflict handling.
+- **Transfer verification** via SHA-256 tree comparison, enabled from the More menu or command palette.
+- **Archive browser** with selective Open and Extract Selected, without unpacking unrelated files.
+- **Custom shell actions** with Selected Items or Current Folder scope, optional Terminal execution, and a persistent manager.
+- **Copy Path As** POSIX, File URL, shell-quoted, or JSON.
+- **`uu` CLI and `uu-explorer://` URL scheme** for opening folders and files from scripts, Shortcuts, or another app.
 - **Open With**, **Quick Actions**, and the system **Share** picker.
 - **Compress**, **Extract Here/To…**, **RAR/7-Zip extraction**, and password-protected ZIP creation.
 - **Saved SMB/AFP/NFS locations** that reconnect through macOS while keeping credentials in the system keychain.
@@ -79,6 +86,14 @@ UU Explorer is a real AppKit/SwiftUI application, not a Finder skin. It brings t
 ### Recursive search
 
 <a href="Screenshots/search.png"><img src="Screenshots/search.png" alt="Recursive search results"></a>
+
+### Archive browser
+
+<a href="Screenshots/archive-browser.png"><img src="Screenshots/archive-browser.png" alt="Archive browser showing selective extraction"></a>
+
+### Custom actions
+
+<a href="Screenshots/custom-actions.png"><img src="Screenshots/custom-actions.png" alt="Custom shell action manager"></a>
 
 ## Install
 
@@ -131,6 +146,29 @@ You can disable automatic checks from **UU Explorer → Automatically Check for 
 | ⇧⌘. | Show hidden files |
 | ⌘, | Settings |
 
+## Shell and URL integration
+
+Install the `uu` helper on your `PATH`:
+
+```bash
+./scripts/install-cli.sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Then `uu .`, `uu ~/Downloads`, or `uu path/to/file` opens the location in UU Explorer. The helper uses the registered `uu-explorer://open?path=…` URL scheme, so it also works from Shortcuts, Alfred, Raycast, or any script:
+
+```bash
+open -b com.uulabs.uuexplorer "uu-explorer://open?path=$HOME/Downloads"
+```
+
+Custom actions receive the current folder and selection through:
+
+- `$@` — selected paths (or the current folder)
+- `$UU_SELECTED_PATHS` — newline-separated paths
+- `$UU_FIRST_PATH`, `$UU_CURRENT_DIR`, `$UU_SELECTED_COUNT`, `$UU_APP`
+
+Commands run with your user permissions. Only add scripts you trust.
+
 ## Build from source
 
 Requirements: macOS 14+, Xcode command-line tools, and Swift 6.
@@ -165,7 +203,7 @@ See [RELEASING.md](RELEASING.md) for the release checklist and the permissions r
 Sources/ExplorerCore/        Testable filesystem, archive, search, sizing, and update primitives
 Sources/Explorer/Model/      ExplorerModel, tabs, panes, undo, operation queue
 Sources/Explorer/Views/      AppKit table + SwiftUI shell, settings, palette, sheets
-Sources/Explorer/Support/    Window integration, Quick Look, updater, sharing
+Sources/Explorer/Support/    Window integration, Quick Look, updater, transfer session, sharing
 Tests/                       ExplorerCore unit tests
 scripts/                     Portable app, DMG, release, test, and icon scripts
 ```
@@ -174,6 +212,8 @@ scripts/                     Portable app, DMG, release, test, and icon scripts
 - AppKit `NSTableView` for the details grid; SwiftUI for the shell, palettes, sheets, and settings.
 - One `ExplorerModel` per browser pane; tabs restore folder, history, selection, sort, filter, and view mode.
 - Theme settings persist to `~/Library/Application Support/UU Explorer/theme.json` and UserDefaults.
+- Custom actions persist to `~/Library/Application Support/UU Explorer/custom-actions.json`; `UU_EXPLORER_ACTIONS_FILE` can isolate them for tests.
+- Archive extraction uses `/usr/bin/bsdtar` for entry-level listing and selective extraction; encrypted RAR/7-Zip still requires a compatible external tool.
 - No third-party runtime dependencies.
 
 ## Testing
@@ -182,7 +222,7 @@ scripts/                     Portable app, DMG, release, test, and icon scripts
 swift test
 ```
 
-The repository includes 55 `ExplorerCore` tests covering path handling, sorting, archive round-trips, search, batch rename planning, folder sizes, volume metadata, network address parsing, and update release/checksum selection.
+The repository includes 59 `ExplorerCore` tests covering path handling, sorting, archive round-trips, archive entry selection, search, batch rename planning, folder sizes, volume metadata, network address parsing, transfer byte accounting and verification, and update release/checksum selection.
 
 ## Security and privacy
 

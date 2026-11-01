@@ -130,6 +130,28 @@ final class ArchiveServiceTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: extracted, encoding: .utf8), "seven")
     }
 
+    func testArchiveEntriesAndSelectiveExtraction() throws {
+        let source = tempDirectory.appendingPathComponent("Project", isDirectory: true)
+        let nested = source.appendingPathComponent("Sub", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try Data("alpha".utf8).write(to: source.appendingPathComponent("alpha.txt"))
+        try Data("beta".utf8).write(to: nested.appendingPathComponent("beta.txt"))
+        let archive = tempDirectory.appendingPathComponent("Project.zip")
+        try ArchiveService.compress(source, to: archive)
+
+        let entries = try ArchiveService.entries(of: archive)
+        XCTAssertTrue(entries.contains { $0.path == "Project/alpha.txt" && !$0.isDirectory })
+        XCTAssertTrue(entries.contains { $0.path == "Project/Sub" && $0.isDirectory })
+
+        let output = tempDirectory.appendingPathComponent("OneEntry", isDirectory: true)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let entry = try XCTUnwrap(entries.first { $0.path == "Project/Sub/beta.txt" })
+        try ArchiveService.extractEntry(entry, from: archive, to: output)
+        let extracted = output.appendingPathComponent("Project/Sub/beta.txt")
+        XCTAssertEqual(try String(contentsOf: extracted, encoding: .utf8), "beta")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.appendingPathComponent("Project/alpha.txt").path))
+    }
+
     func testUnsupportedArchiveIsRejected() throws {
         let archive = tempDirectory.appendingPathComponent("notes.txt")
         try Data("not an archive".utf8).write(to: archive)

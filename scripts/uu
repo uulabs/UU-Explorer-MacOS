@@ -1,0 +1,12 @@
+#!/bin/bash
+set -euo pipefail
+
+TARGET="${1:-$PWD}"
+if [[ ! -e "$TARGET" ]]; then
+  echo "uu: path not found: $TARGET" >&2
+  exit 1
+fi
+
+ABS="$(cd "$(dirname "$TARGET")" && pwd)/$(basename "$TARGET")"
+ENCODED="$(/usr/bin/python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$ABS")"
+/usr/bin/open -b com.uulabs.uuexplorer "uu-explorer://open?path=$ENCODED"

@@ -18,7 +18,7 @@ The in-app updater consumes the **ZIP + `.sha256`** pair from the latest stable 
 5. Create a tag and GitHub release with the four assets:
 
    ```bash
-   VERSION="1.19.0"
+   VERSION="1.20.0"
    git tag -a "v$VERSION" -m "UU Explorer $VERSION"
    git push origin "v$VERSION"
 

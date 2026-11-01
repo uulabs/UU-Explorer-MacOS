@@ -35,7 +35,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
+        let deepLinks = urls.filter { $0.scheme?.lowercased() == "uu-explorer" }
+        if !deepLinks.isEmpty {
+            for deepLink in deepLinks {
+                openDeepLink(deepLink)
+            }
+            let files = urls.filter(\.isFileURL)
+            if !files.isEmpty {
+                openExternal(files, reveal: false)
+            }
+            return
+        }
         openExternal(urls, reveal: false)
+    }
+
+    private func openDeepLink(_ url: URL) {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let rawPath = components.queryItems?.first(where: { $0.name == "path" })?.value,
+              !rawPath.isEmpty else {
+            return
+        }
+        let target = URL(fileURLWithPath: rawPath).standardizedFileURL
+        guard FileManager.default.fileExists(atPath: target.path) else {
+            model?.showStatus("Couldn’t find “\(rawPath)”.", kind: .error)
+            return
+        }
+        openExternal([target], reveal: false)
     }
 
     @objc private func handleRevealEvent(

@@ -269,12 +269,30 @@ struct MoreMenu: View {
                 .disabled(model.selection.isEmpty)
             Button("Copy Path") { model.copySelectionPath() }
                 .disabled(model.selection.isEmpty)
+            Menu("Copy Path As") {
+                ForEach(PathCopyFormat.allCases) { format in
+                    Button(format.title) { model.copySelectionPath(as: format) }
+                        .disabled(model.selection.isEmpty)
+                }
+            }
+            Menu("Custom Actions") {
+                ForEach(model.customActions.filter(\.isEnabled)) { action in
+                    Button(action.name.isEmpty ? "Untitled Action" : action.name) {
+                        model.runCustomAction(action)
+                    }
+                }
+                if !model.customActions.isEmpty { Divider() }
+                Button("Manage Custom Actions…") { model.beginCustomActionManager() }
+            }
             Button("Show in Finder") { model.revealSelectionInFinder() }
                 .disabled(model.selection.isEmpty)
             Button("Open in Terminal") { model.openCurrentFolderInTerminal() }
             Button("Add Network Location…") { model.addNetworkLocation() }
             if model.selection.count == 1 {
                 Button("Compress with Password…") { model.beginEncryptedCompression() }
+                if let item = model.selectedItems.first, ArchiveService.isArchive(item.url) {
+                    Button("Browse Archive…") { model.beginArchiveBrowsing() }
+                }
             }
             if let first = model.selectedItems.first {
                 let applications = model.openWithApplications(for: first.url)
@@ -318,6 +336,9 @@ struct MoreMenu: View {
                 model.toggleSidebar()
             }
             Divider()
+            Button(model.verifyTransfers ? "Disable Transfer Verification" : "Verify Transfers") {
+                model.toggleVerifyTransfers()
+            }
             Button("Calculate Folder Sizes") { model.calculateVisibleFolderSizes() }
             Button("Calculate Selected Folder Sizes") { model.calculateSelectedFolderSizes() }
                 .disabled(!model.selectedItems.contains(where: \.isDirectory))

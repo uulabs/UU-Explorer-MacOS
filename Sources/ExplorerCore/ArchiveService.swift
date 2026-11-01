@@ -18,6 +18,24 @@ public enum ArchiveFormat: String, Sendable {
     }
 }
 
+public struct ArchiveEntry: Identifiable, Hashable, Sendable {
+    public let path: String
+    public let isDirectory: Bool
+
+    public var id: String { path }
+    public var name: String {
+        path.split(separator: "/").last.map(String.init) ?? path
+    }
+    public var extractionPath: String {
+        isDirectory ? path + "/" : path
+    }
+
+    public init(path: String, isDirectory: Bool) {
+        self.path = path
+        self.isDirectory = isDirectory
+    }
+}
+
 public enum ArchiveError: LocalizedError {
     case unsupportedFormat
     case sourceMissing(String)
@@ -25,6 +43,7 @@ public enum ArchiveError: LocalizedError {
     case destinationExists(String)
     case commandFailed(String)
     case toolMissing(String)
+    case invalidEntry(String)
 
     public var errorDescription: String? {
         switch self {
@@ -40,6 +59,8 @@ public enum ArchiveError: LocalizedError {
             return message.isEmpty ? "The archive operation failed." : message
         case .toolMissing(let format):
             return "Extracting \(format) archives needs 7-Zip, unar, or unrar. Install one and try again."
+        case .invalidEntry(let path):
+            return "The archive contains an unsafe path: \(path)"
         }
     }
 }
@@ -105,6 +126,84 @@ public enum ArchiveService {
               top != ".",
               top != ".." else { return nil }
         return top
+    }
+
+    /// Lists archive entries as relative paths. Missing directory entries are
+    /// synthesized so the browser can show a folder hierarchy.
+    public static func entries(of archive: URL) throws -> [ArchiveEntry] {
+        guard let format = format(for: archive) else {
+            throw ArchiveError.unsupportedFormat
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: archive.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue else {
+            throw ArchiveError.sourceMissing(archive.lastPathComponent)
+        }
+
+        let listing = try listEntries(archive, format: format)
+        var entries: [ArchiveEntry] = []
+        var seen = Set<String>()
+
+        func append(_ path: String, isDirectory: Bool) {
+            guard validRelativePath(path), seen.insert(path).inserted else { return }
+            entries.append(ArchiveEntry(path: path, isDirectory: isDirectory))
+        }
+
+        for rawLine in listing.split(whereSeparator: \.isNewline) {
+            var name = String(rawLine)
+            while name.hasPrefix("./") { name.removeFirst(2) }
+            guard !name.isEmpty,
+                  name != ".",
+                  name != "__MACOSX",
+                  !name.hasPrefix("__MACOSX/") else { continue }
+            let isDir = name.hasSuffix("/")
+            while name.hasSuffix("/") { name.removeLast() }
+            guard !name.isEmpty else { continue }
+
+            var components = name.split(separator: "/").map(String.init)
+            if components.count > 1 {
+                for index in 1..<components.count {
+                    append(components.prefix(index).joined(separator: "/"), isDirectory: true)
+                }
+            }
+            append(name, isDirectory: isDir)
+        }
+
+        return entries.sorted {
+            if $0.path == $1.path { return $0.isDirectory && !$1.isDirectory }
+            return $0.path.localizedStandardCompare($1.path) == .orderedAscending
+        }
+    }
+
+    /// Extracts one file or directory entry into an existing destination folder.
+    /// Entry paths are validated before invoking bsdtar.
+    public static func extractEntry(
+        _ entry: ArchiveEntry,
+        from archive: URL,
+        to destination: URL
+    ) throws {
+        guard format(for: archive) != nil else {
+            throw ArchiveError.unsupportedFormat
+        }
+        guard validRelativePath(entry.path) else {
+            throw ArchiveError.invalidEntry(entry.path)
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: destination.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            throw ArchiveError.destinationMissing(destination.lastPathComponent)
+        }
+        try run("/usr/bin/bsdtar", [
+            "-xf", archive.path,
+            "-C", destination.path,
+            entry.extractionPath
+        ])
+    }
+
+    private static func validRelativePath(_ path: String) -> Bool {
+        guard !path.isEmpty, !path.hasPrefix("/") else { return false }
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        return !components.contains(where: { $0 == ".." || $0.isEmpty })
     }
 
     public static func compress(_ source: URL, to destination: URL) throws {

@@ -767,6 +767,17 @@ struct FileTableView: NSViewRepresentable {
                 menu.addItem(menuItem("Quick Look", action: #selector(menuQuickLook(_:))))
                 menu.addItem(menuItem("Show in Finder", action: #selector(menuReveal(_:))))
                 menu.addItem(menuItem("Copy Path", action: #selector(menuCopyPath(_:))))
+                let copyPath = NSMenu()
+                for format in PathCopyFormat.allCases {
+                    copyPath.addItem(menuItem(
+                        format.title,
+                        action: #selector(menuCopyPathFormat(_:)),
+                        representedObject: format.rawValue
+                    ))
+                }
+                let copyPathParent = NSMenuItem(title: "Copy Path As", action: nil, keyEquivalent: "")
+                copyPathParent.submenu = copyPath
+                menu.addItem(copyPathParent)
                 if items[row].isDirectory {
                     menu.addItem(menuItem(
                         model.isFavorite(items[row].url) ? "Remove from Favourites" : "Pin to Favourites",
@@ -785,6 +796,11 @@ struct FileTableView: NSViewRepresentable {
                     enabled: selectedCount == 1
                 ))
                 if ArchiveService.isArchive(items[row].url) {
+                    menu.addItem(menuItem(
+                        "Browse Archive…",
+                        action: #selector(menuBrowseArchive(_:)),
+                        enabled: selectedCount == 1
+                    ))
                     menu.addItem(menuItem(
                         "Extract Here",
                         action: #selector(menuExtractHere(_:)),
@@ -821,6 +837,24 @@ struct FileTableView: NSViewRepresentable {
                 let quickParent = NSMenuItem(title: "Quick Actions", action: nil, keyEquivalent: "")
                 quickParent.submenu = quick
                 menu.addItem(quickParent)
+                let customActions = NSMenu()
+                for action in model.customActions where action.isEnabled {
+                    let item = NSMenuItem(
+                        title: action.name.isEmpty ? "Untitled Action" : action.name,
+                        action: #selector(menuRunCustomAction(_:)),
+                        keyEquivalent: ""
+                    )
+                    item.target = self
+                    item.representedObject = action.id.uuidString
+                    customActions.addItem(item)
+                }
+                if !customActions.items.isEmpty {
+                    customActions.addItem(.separator())
+                }
+                customActions.addItem(menuItem("Manage Custom Actions…", action: #selector(menuManageCustomActions(_:))))
+                let customParent = NSMenuItem(title: "Custom Actions", action: nil, keyEquivalent: "")
+                customParent.submenu = customActions
+                menu.addItem(customParent)
                 if model.selectedItems.contains(where: \.isDirectory) {
                     menu.addItem(menuItem(
                         "Calculate Folder Size",
@@ -874,6 +908,18 @@ struct FileTableView: NSViewRepresentable {
         }
         @objc private func menuReveal(_ sender: Any?) { model.revealSelectionInFinder() }
         @objc private func menuCopyPath(_ sender: Any?) { model.copySelectionPath() }
+        @objc private func menuCopyPathFormat(_ sender: Any?) {
+            guard let raw = (sender as? NSMenuItem)?.representedObject as? String,
+                  let format = PathCopyFormat(rawValue: raw) else { return }
+            model.copySelectionPath(as: format)
+        }
+        @objc private func menuRunCustomAction(_ sender: Any?) {
+            guard let raw = (sender as? NSMenuItem)?.representedObject as? String,
+                  let id = UUID(uuidString: raw),
+                  let action = model.customActions.first(where: { $0.id == id }) else { return }
+            model.runCustomAction(action)
+        }
+        @objc private func menuManageCustomActions(_ sender: Any?) { model.beginCustomActionManager() }
         @objc private func menuCut(_ sender: Any?) { model.copySelectionToPasteboard(cut: true) }
         @objc private func menuCopy(_ sender: Any?) { model.copySelectionToPasteboard() }
         @objc private func menuQuickLook(_ sender: Any?) { model.quickLookSelection() }
@@ -912,5 +958,6 @@ struct FileTableView: NSViewRepresentable {
         @objc private func menuRefresh(_ sender: Any?) { model.refresh() }
         @objc private func menuCalculateVisibleFolderSizes(_ sender: Any?) { model.calculateVisibleFolderSizes() }
         @objc private func menuEncryptedCompress(_ sender: Any?) { model.beginEncryptedCompression() }
+        @objc private func menuBrowseArchive(_ sender: Any?) { model.beginArchiveBrowsing() }
     }
 }

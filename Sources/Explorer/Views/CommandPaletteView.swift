@@ -1,3 +1,4 @@
+import ExplorerCore
 import SwiftUI
 
 private struct PaletteCommand: Identifiable {
@@ -22,7 +23,7 @@ struct CommandPaletteView: View {
     private var commands: [PaletteCommand] {
         let hasSelection = !model.selection.isEmpty
         let hasFolders = model.selectedItems.contains(where: \.isDirectory)
-        return [
+        let base: [PaletteCommand] = [
             command("new-folder", "New Folder", "Create a folder here", "folder.badge.plus") {
                 model.beginNewFolder()
             },
@@ -53,6 +54,9 @@ struct CommandPaletteView: View {
             command("share", "Share…", "Share the selection", "square.and.arrow.up", enabled: hasSelection) {
                 model.shareSelection()
             },
+            command("verify-transfers", model.verifyTransfers ? "Disable Transfer Verification" : "Verify Transfers", "Compare copied data with SHA-256", "checkmark.shield") {
+                model.toggleVerifyTransfers()
+            },
             command("copy", "Copy", "Copy the selection", "doc.on.doc", enabled: hasSelection) {
                 model.copySelectionToPasteboard()
             },
@@ -70,6 +74,9 @@ struct CommandPaletteView: View {
             },
             command("reveal", "Show in Finder", "Reveal the selection in Finder", "folder", enabled: hasSelection) {
                 model.revealSelectionInFinder()
+            },
+            command("browse-archive", "Browse Archive…", "Inspect and selectively extract archive contents", "archivebox", enabled: model.selectedItems.count == 1 && model.selectedItems.first.map { ArchiveService.isArchive($0.url) } == true) {
+                model.beginArchiveBrowsing()
             },
             command("folder-size", "Calculate Folder Sizes", "Measure visible folders", "externaldrive") {
                 model.calculateVisibleFolderSizes()
@@ -103,6 +110,22 @@ struct CommandPaletteView: View {
             },
             command("settings", "UU Explorer Settings…", "Open settings", "gearshape") {
                 SettingsWindowController.shared.showSettings()
+            }
+        ]
+        let customActions = model.customActions.filter(\.isEnabled).map { action in
+            command(
+                "custom-\(action.id.uuidString)",
+                action.name.isEmpty ? "Untitled Action" : action.name,
+                "Run custom action",
+                "terminal",
+                enabled: action.scope == .currentFolder || hasSelection
+            ) {
+                model.runCustomAction(action)
+            }
+        }
+        return base + customActions + [
+            command("manage-custom-actions", "Manage Custom Actions…", "Add, edit, or remove shell actions", "slider.horizontal.3") {
+                model.beginCustomActionManager()
             }
         ]
     }

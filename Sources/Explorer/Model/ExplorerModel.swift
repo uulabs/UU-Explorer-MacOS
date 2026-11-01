@@ -80,6 +80,23 @@ struct EncryptedZipRequest: Identifiable {
     let target: URL
 }
 
+enum PathCopyFormat: String, CaseIterable, Identifiable {
+    case posix
+    case fileURL
+    case shellQuoted
+    case json
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .posix: return "POSIX Path"
+        case .fileURL: return "File URL"
+        case .shellQuoted: return "Shell Quoted"
+        case .json: return "JSON Array"
+        }
+    }
+}
+
 struct TreeRevealRequest: Equatable {
     let id = UUID()
     let path: String
@@ -183,8 +200,12 @@ final class ExplorerModel: ObservableObject {
     @Published private(set) var isSearching = false
     @Published private(set) var savedSearches: [SavedSearch]
     @Published private(set) var networkLocations: [NetworkLocation]
+    @Published private(set) var customActions: [CustomAction]
+    @Published var isManagingCustomActions = false
+    @Published private(set) var verifyTransfers: Bool
     @Published var batchRename: BatchRenameSession?
     @Published var encryptedZip: EncryptedZipRequest?
+    @Published var archiveBrowser: ArchiveBrowserRequest?
     @Published private(set) var folderSizes: [String: FolderSize] = [:]
     @Published private(set) var calculatingFolderPaths: Set<String> = []
     @Published private(set) var isCalculatingFolderSizes = false
@@ -262,6 +283,8 @@ final class ExplorerModel: ObservableObject {
         } else {
             self.networkLocations = []
         }
+        self.verifyTransfers = defaults.bool(forKey: "UUExplorer.verifyTransfers")
+        self.customActions = Self.loadCustomActions()
         let storedFavorites = defaults.array(forKey: "UUExplorer.favorites.v1") as? [String] ?? []
         self.favorites = storedFavorites
             .map { URL(fileURLWithPath: $0).standardizedFileURL }
@@ -1224,12 +1247,30 @@ final class ExplorerModel: ObservableObject {
     }
 
     func copySelectionPath() {
-        let paths = selectedItems.map(\.url.path)
-        guard !paths.isEmpty else { return }
+        copySelectionPath(as: .posix)
+    }
+
+    func copySelectionPath(as format: PathCopyFormat) {
+        let urls = selectedItems.map(\.url)
+        guard !urls.isEmpty else { return }
+        let text: String
+        switch format {
+        case .posix:
+            text = urls.map(\.path).joined(separator: "\n")
+        case .fileURL:
+            text = urls.map(\.absoluteString).joined(separator: "\n")
+        case .shellQuoted:
+            text = urls.map { "'" + $0.path.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+                .joined(separator: " ")
+        case .json:
+            let values = urls.map(\.path)
+            text = (try? JSONEncoder().encode(values))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(paths.joined(separator: "\n"), forType: .string)
-        showStatus(paths.count == 1 ? "Copied path" : "Copied \(paths.count) paths")
+        pasteboard.setString(text, forType: .string)
+        showStatus(urls.count == 1 ? "Copied path as \(format.title)" : "Copied \(urls.count) paths as \(format.title)")
     }
 
     func copySelectionToPasteboard(cut: Bool = false) {
@@ -1272,6 +1313,11 @@ final class ExplorerModel: ObservableObject {
 
     /// Used by drag-and-drop and the future operation queue. Copies keep the
     /// source name; moves remove it. Existing names never overwrite.
+    func toggleVerifyTransfers() {
+        verifyTransfers.toggle()
+        defaults.set(verifyTransfers, forKey: "UUExplorer.verifyTransfers")
+    }
+
     func transfer(_ urls: [URL], to destination: URL, copy: Bool) {
         performTransfer(
             urls,
@@ -1304,7 +1350,8 @@ final class ExplorerModel: ObservableObject {
         operations.enqueueTransfer(
             sources: sources,
             destination: destination,
-            isMove: isCut
+            isMove: isCut,
+            verify: verifyTransfers
         ) { [weak self] outcome in
             guard let self else { return }
             if clearCutPasteboard, isCut, outcome.failures.isEmpty, !outcome.cancelled {
@@ -1337,6 +1384,148 @@ final class ExplorerModel: ObservableObject {
             if !outcome.cancelled {
                 self.registerTransferUndo(isCut: isCut, pairs: outcome.pairs)
             }
+        }
+    }
+
+    // MARK: Custom actions
+
+    func beginCustomActionManager() {
+        isManagingCustomActions = true
+    }
+
+    func upsertCustomAction(_ action: CustomAction) {
+        if let index = customActions.firstIndex(where: { $0.id == action.id }) {
+            customActions[index] = action
+        } else {
+            customActions.append(action)
+        }
+        customActions.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        persistCustomActions()
+    }
+
+    func deleteCustomAction(_ action: CustomAction) {
+        customActions.removeAll { $0.id == action.id }
+        persistCustomActions()
+    }
+
+    func runCustomAction(_ action: CustomAction) {
+        guard action.isEnabled else { return }
+        let paths: [URL]
+        switch action.scope {
+        case .selection:
+            paths = selectedItems.map(\.url)
+            guard !paths.isEmpty else {
+                showStatus("Select items before running “\(action.name)”.", kind: .error)
+                return
+            }
+        case .currentFolder:
+            paths = [currentURL]
+        }
+
+        if action.runInTerminal {
+            openCustomActionInTerminal(action, paths: paths)
+            return
+        }
+
+        let command = action.command
+        let directory = currentURL
+        let environment = customActionEnvironment(paths: paths)
+        showStatus("Running “\(action.name)”…")
+        Task { [weak self] in
+            let status: Int32 = await Task.detached(priority: .userInitiated) {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+                process.arguments = ["-lc", command, "uu-action"] + paths.map(\.path)
+                process.currentDirectoryURL = directory
+                process.environment = environment
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    return process.terminationStatus
+                } catch {
+                    return -1
+                }
+            }.value
+            guard let self else { return }
+            if status == 0 {
+                self.showStatus("“\(action.name)” completed")
+            } else {
+                self.showStatus("“\(action.name)” failed with status \(status)", kind: .error)
+            }
+        }
+    }
+
+    private func customActionEnvironment(paths: [URL]) -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        environment["UU_CURRENT_DIR"] = currentURL.path
+        environment["UU_SELECTED_COUNT"] = String(paths.count)
+        environment["UU_SELECTED_PATHS"] = paths.map(\.path).joined(separator: "\n")
+        environment["UU_FIRST_PATH"] = paths.first?.path ?? ""
+        environment["UU_APP"] = Bundle.main.bundlePath
+        return environment
+    }
+
+    private func openCustomActionInTerminal(_ action: CustomAction, paths: [URL]) {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("UU Explorer", isDirectory: true)
+            .appendingPathComponent("Custom Actions", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+            let script = support.appendingPathComponent("\(action.id.uuidString).command")
+            var lines = ["#!/bin/zsh", "cd \(shellQuote(currentURL.path))"]
+            lines.append("export UU_CURRENT_DIR=\(shellQuote(currentURL.path))")
+            lines.append("export UU_SELECTED_COUNT=\(shellQuote(String(paths.count)))")
+            lines.append("export UU_SELECTED_PATHS=\(shellQuote(paths.map(\.path).joined(separator: "\n")))")
+            lines.append("export UU_FIRST_PATH=\(shellQuote(paths.first?.path ?? ""))")
+            lines.append("export UU_APP=\(shellQuote(Bundle.main.bundlePath))")
+            lines.append("set -- " + paths.map { shellQuote($0.path) }.joined(separator: " "))
+            lines.append(action.command)
+            lines.append("status=$?")
+            lines.append("printf '\\n[UU Explorer action finished with status %d — press Return to close]\\n' \"$status\"")
+            lines.append("read -r")
+            lines.append("exit $status")
+            try lines.joined(separator: "\n").appending("\n").write(to: script, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+            NSWorkspace.shared.open(script)
+            showStatus("Opened “\(action.name)” in Terminal")
+        } catch {
+            showStatus("Couldn’t launch the action: \(error.localizedDescription)", kind: .error)
+        }
+    }
+
+    private func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private static func customActionsFileURL() -> URL? {
+        if let override = ProcessInfo.processInfo.environment["UU_EXPLORER_ACTIONS_FILE"],
+           !override.isEmpty {
+            return URL(fileURLWithPath: (override as NSString).expandingTildeInPath)
+        }
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("UU Explorer", isDirectory: true)
+            .appendingPathComponent("custom-actions.json")
+    }
+
+    private static func loadCustomActions() -> [CustomAction] {
+        guard let url = customActionsFileURL(),
+              let data = try? Data(contentsOf: url),
+              let actions = try? JSONDecoder().decode([CustomAction].self, from: data) else {
+            return []
+        }
+        return actions
+    }
+
+    private func persistCustomActions() {
+        guard let url = Self.customActionsFileURL(),
+              let data = try? JSONEncoder().encode(customActions) else { return }
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            showStatus("Couldn’t save custom actions: \(error.localizedDescription)", kind: .error)
         }
     }
 
@@ -1492,6 +1681,16 @@ final class ExplorerModel: ObservableObject {
     }
 
     // MARK: Encrypted ZIP
+
+    func beginArchiveBrowsing() {
+        guard selectedItems.count == 1,
+              let item = selectedItems.first,
+              ArchiveService.isArchive(item.url) else {
+            showStatus("Select one archive to browse.", kind: .error)
+            return
+        }
+        archiveBrowser = ArchiveBrowserRequest(archive: item.url)
+    }
 
     func beginEncryptedCompression() {
         let selected = selectedItems

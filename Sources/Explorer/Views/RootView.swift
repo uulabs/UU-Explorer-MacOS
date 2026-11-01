@@ -62,6 +62,12 @@ struct RootView: View {
         .sheet(item: $model.encryptedZip) { request in
             EncryptedZipView(model: model, request: request)
         }
+        .sheet(item: $model.archiveBrowser) { request in
+            ArchiveBrowserView(archive: request.archive)
+        }
+        .sheet(isPresented: $model.isManagingCustomActions) {
+            CustomActionManagerView(model: model)
+        }
         .sheet(isPresented: $model.isShowingStorageUsage) {
             StorageUsageView(model: model)
         }
