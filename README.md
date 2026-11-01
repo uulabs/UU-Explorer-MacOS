@@ -1,0 +1,201 @@
+<p align="center">
+  <img src="Screenshots/app-icon.png" width="112" alt="UU Explorer app icon">
+</p>
+
+<h1 align="center">UU Explorer</h1>
+
+<p align="center">
+  A native, Windows Explorer-style file browser for macOS.<br>
+  Fast keyboard navigation, tabs and split panes, recursive search, batch rename, folder sizes, and a real command palette.
+</p>
+
+<p align="center">
+  <a href="https://github.com/uulabs/UU-Explorer-MacOS/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/uulabs/UU-Explorer-MacOS?display_name=tag&sort=semver"></a>
+  <img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-111111?logo=apple">
+  <img alt="Swift 6" src="https://img.shields.io/badge/Swift-6-F05138?logo=swift">
+  <a href="https://github.com/uulabs/UU-Explorer-MacOS/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/uulabs/UU-Explorer-MacOS/actions/workflows/ci.yml/badge.svg"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/uulabs/UU-Explorer-MacOS/releases/latest"><b>Download the latest release →</b></a>
+</p>
+
+<img src="Screenshots/hero.png" alt="UU Explorer details view with the preview pane">
+
+## Why UU Explorer
+
+UU Explorer is a real AppKit/SwiftUI application, not a Finder skin. It brings the density and speed of a classic two-pane file manager to macOS without giving up native Quick Look, TCC-aware volume access, or macOS sharing and Open With integrations.
+
+- **Keyboard-first**: menu shortcuts, Space Quick Look, ⌘K command palette, and arrow-key gallery navigation.
+- **Built for large folders**: sortable details view, live filtering, recursive search, and on-demand folder sizing.
+- **Real file operations**: a cancellable operation queue with progress, conflict choices, and undo/redo.
+- **Native integrations**: Quick Look, Open With, Share, Terminal, Trash, Finder reveal, and mounted volumes.
+- **No account, telemetry, or bundled network service**: file browsing stays on the Mac.
+
+## Features
+
+### Browse
+
+- **Details and Gallery views** with remembered per-tab sort, filter, view mode, and selection.
+- **Tabs** with session restore, reopen-closed-tab, drag reordering, and per-tab history.
+- **Split view** with two independent browser panes and active-pane menu routing.
+- **Path bar** with parent folders, breadcrumbs, autocomplete, and a folder browser.
+- **Sidebar tree** for mounted volumes and lazy folder expansion, plus pinned Favourites.
+- **Quick Look** and an optional preview pane for images, folders, and supported documents.
+- **Drag and drop** into folder rows, sidebar destinations, gallery cards, and tabs.
+
+### Find and organize
+
+- **Recursive search** from the filter field with a scope switch and a 2,000-result safety cap.
+- **Saved searches** in the sidebar, with one-click reruns.
+- **Batch rename** with live preview for find/replace, prefix/suffix, or numbering.
+- **Undo/redo** for copy, move, rename, create, Trash, and supported archive operations.
+- **Folder sizes** in the Size column and selection status, plus a Storage Usage panel.
+- **Volume Properties** with capacity, format, mount point, UUID, media type, and access details.
+
+### Take action
+
+- **Operation queue** with progress, cancel, and Replace / Keep Both / Skip / Apply to All conflict handling.
+- **Open With**, **Quick Actions**, and the system **Share** picker.
+- **Compress**, **Extract Here/To…**, **RAR/7-Zip extraction**, and password-protected ZIP creation.
+- **Saved SMB/AFP/NFS locations** that reconnect through macOS while keeping credentials in the system keychain.
+- **Command palette** for file, view, search, sizing, and settings actions.
+- **Ten theme presets**, independent light/dark palettes, and eight folder icon styles.
+
+## Screenshots
+
+### Gallery
+
+<a href="Screenshots/gallery.png"><img src="Screenshots/gallery.png" alt="Gallery view"></a>
+
+### Split view
+
+<a href="Screenshots/split-view.png"><img src="Screenshots/split-view.png" alt="Split view with details and gallery panes"></a>
+
+### Command palette
+
+<a href="Screenshots/command-palette.png"><img src="Screenshots/command-palette.png" alt="Command palette"></a>
+
+### Recursive search
+
+<a href="Screenshots/search.png"><img src="Screenshots/search.png" alt="Recursive search results"></a>
+
+## Install
+
+Requires **macOS 14 or later** on Apple Silicon.
+
+1. Download the latest **`.dmg`** from [Releases](https://github.com/uulabs/UU-Explorer-MacOS/releases/latest).
+2. Open the disk image and drag **UU Explorer** into **Applications**.
+3. Launch it from Applications.
+
+The app is developer-signed, not notarized. If macOS blocks the first launch, Control-click the app, choose **Open**, then confirm. You can also allow it from **System Settings → Privacy & Security**.
+
+### First run and permissions
+
+UU Explorer is non-sandboxed so it can browse the folders you open, including external volumes. macOS may ask for access to Desktop, Documents, Downloads, removable volumes, or protected locations. Full Disk Access is optional and only needed for protected system locations.
+
+## Automatic updates
+
+UU Explorer checks the latest **stable GitHub release** at most once per day. You can also choose **UU Explorer → Check for Updates…** at any time.
+
+An update is offered only after the app verifies:
+
+- the release is stable and the version is newer;
+- the downloaded archive matches the published **SHA-256** sidecar;
+- the extracted app has bundle ID `com.uulabs.uuexplorer`;
+- the app is signed with UULabs’ Team ID `V726L7NR7H`;
+- the bundle version matches the GitHub release tag.
+
+The app asks before installing. On approval, a small relaunch helper atomically replaces the app and reopens it. Updates are not installed silently. The updater uses the public GitHub API and does not contain or require a GitHub token.
+
+You can disable automatic checks from **UU Explorer → Automatically Check for Updates**.
+
+## Keyboard shortcuts
+
+| Shortcut | Action |
+|---|---|
+| ⌘K | Command palette |
+| ⌘T / ⌘W | New tab / close tab |
+| ⇧⌘T | Reopen closed tab |
+| ⌃Tab / ⌃⇧Tab | Next / previous tab |
+| ⌘N / ⌃⌘N | New window / move tab to new window |
+| ⌘\\ | Toggle split view |
+| ⌘1 / ⌘2 | Details / Gallery |
+| Space | Quick Look |
+| Return | Open selection |
+| F2 | Rename |
+| ⌥⌘R | Batch rename |
+| ⌘⌫ | Move to Trash |
+| ⌘Z / ⇧⌘Z | Undo / redo file operation |
+| ⌘L | Edit path |
+| ⇧⌘. | Show hidden files |
+| ⌘, | Settings |
+
+## Build from source
+
+Requirements: macOS 14+, Xcode command-line tools, and Swift 6.
+
+```bash
+git clone git@github.com:uulabs/UU-Explorer-MacOS.git
+cd UU-Explorer-MacOS
+swift test
+./scripts/build-app.sh
+open "dist/UU Explorer.app"
+```
+
+Create a drag-to-Applications disk image:
+
+```bash
+./scripts/build-dmg.sh
+```
+
+Create the updater assets (ZIP + SHA-256 + DMG checksum):
+
+```bash
+./scripts/build-release.sh
+```
+
+`build-app.sh` uses `.build` by default. Set `UU_BUILD_DIR` to use another build directory, and set `CODESIGN_IDENTITY` to choose a signing identity; without one, the script falls back to an available Developer ID/Apple Development identity or ad-hoc signing.
+
+## Architecture
+
+```
+Sources/ExplorerCore/        Testable filesystem, archive, search, sizing, and update primitives
+Sources/Explorer/Model/      ExplorerModel, tabs, panes, undo, operation queue
+Sources/Explorer/Views/      AppKit table + SwiftUI shell, settings, palette, sheets
+Sources/Explorer/Support/    Window integration, Quick Look, updater, sharing
+Tests/                       ExplorerCore unit tests
+scripts/                     Portable app, DMG, release, test, and icon scripts
+```
+
+- Swift 6 toolchain using Swift 5 language mode for AppKit/SwiftUI compatibility.
+- AppKit `NSTableView` for the details grid; SwiftUI for the shell, palettes, sheets, and settings.
+- One `ExplorerModel` per browser pane; tabs restore folder, history, selection, sort, filter, and view mode.
+- Theme settings persist to `~/Library/Application Support/UU Explorer/theme.json` and UserDefaults.
+- No third-party runtime dependencies.
+
+## Testing
+
+```bash
+swift test
+```
+
+The repository includes 55 `ExplorerCore` tests covering path handling, sorting, archive round-trips, search, batch rename planning, folder sizes, volume metadata, network address parsing, and update release/checksum selection.
+
+## Security and privacy
+
+- No analytics, telemetry, accounts, or background uploads.
+- Update archives are pinned to the UULabs Team ID and verified against a published SHA-256 before installation.
+- Network-location credentials are handled by macOS; UU Explorer stores only the display name and URL.
+- Encrypted ZIP creation uses the system `zip` tool’s classic ZipCrypto format, not modern AES. Use a strong passphrase and treat it as compatibility encryption.
+- RAR/7-Zip extraction uses installed 7-Zip, unar, or unrar where available, with the system `bsdtar` libarchive fallback. Encrypted RAR/7-Zip archives require a compatible external tool.
+
+## Contributing
+
+Issues and focused pull requests are welcome. For larger changes, please open an issue first so the approach and compatibility impact can be discussed.
+
+## License
+
+Copyright © 2026 UULabs. All rights reserved.
+
+The source is published for transparency and evaluation. No license is granted for redistribution or derivative works.
