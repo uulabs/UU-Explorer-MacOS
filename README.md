@@ -155,6 +155,8 @@ Create the updater assets (ZIP + SHA-256 + DMG checksum):
 ./scripts/build-release.sh
 ```
 
+See [RELEASING.md](RELEASING.md) for the release checklist and the permissions required by `gh release create`.
+
 `build-app.sh` uses `.build` by default. Set `UU_BUILD_DIR` to use another build directory, and set `CODESIGN_IDENTITY` to choose a signing identity; without one, the script falls back to an available Developer ID/Apple Development identity or ad-hoc signing.
 
 ## Architecture
