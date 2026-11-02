@@ -148,6 +148,31 @@ struct PathFilterField: View {
 
     private var theme: ResolvedTheme { themeStore.resolved(for: colorScheme) }
 
+    private var searchPlaceholder: String {
+        guard let filter = activeFilterSummary else {
+            return model.searchScope == .recursive ? "Search subfolders" : "Filter"
+        }
+        return "Search · \(filter)"
+    }
+
+    private var activeFilterSummary: String? {
+        var parts: [String] = []
+        if let size = model.searchFilter.minimumSize {
+            parts.append("≥ \(ByteFormat.string(size))")
+        }
+        if let kind = model.searchFilter.kind {
+            parts.append(kind.title)
+        }
+        if let days = model.searchFilter.modifiedWithinDays {
+            parts.append("last \(days)d")
+        }
+        if model.searchFilter.textMode != .name {
+            parts.append("contents")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
+
+
     var body: some View {
         HStack(spacing: 5) {
             Menu {
@@ -178,7 +203,7 @@ struct PathFilterField: View {
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(theme.toolbarText.opacity(0.62))
 
-            TextField(model.searchScope == .recursive ? "Search subfolders" : "Filter", text: Binding(
+            TextField(searchPlaceholder, text: Binding(
                 get: { model.filterText },
                 set: { model.setFilter($0) }
             ))

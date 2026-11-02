@@ -688,8 +688,8 @@ final class ExplorerModel: ObservableObject {
             return
         }
         searchScope = search.scope
-        searchFilter = search.filter ?? SearchFilter()
         openDirectory(root, pushHistory: true, selecting: nil)
+        searchFilter = search.filter ?? SearchFilter()
         filterText = search.query
         if search.scope == .recursive, hasSearchCriteria {
             scheduleRecursiveSearch()
@@ -2322,6 +2322,10 @@ final class ExplorerModel: ObservableObject {
         pathError = false
         pathDraft = ""
         filterText = ""
+        searchFilter = SearchFilter()
+        if let data = try? JSONEncoder().encode(searchFilter) {
+            defaults.set(data, forKey: "UUExplorer.searchFilter.v1")
+        }
 
         if changed {
             items = []
