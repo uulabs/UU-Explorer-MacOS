@@ -10,6 +10,9 @@ final class UpdateService {
     static let expectedTeamIdentifier = "V726L7NR7H"
     static let autoCheckDefaultsKey = "UUExplorer.autoUpdateChecks"
     static let lastCheckDefaultsKey = "UUExplorer.lastUpdateCheck"
+    static let skippedVersionDefaultsKey = "UUExplorer.skippedUpdateVersion"
+    static let lastPromptedVersionDefaultsKey = "UUExplorer.lastPromptedUpdateVersion"
+    static let lastPromptedAtDefaultsKey = "UUExplorer.lastPromptedUpdateDate"
 
     private let defaults: UserDefaults
     private weak var window: NSWindow?
@@ -32,10 +35,8 @@ final class UpdateService {
 
     func checkAutomatically() async {
         guard autoChecksEnabled else { return }
-        if let last = defaults.object(forKey: Self.lastCheckDefaultsKey) as? Date,
-           Date().timeIntervalSince(last) < 24 * 60 * 60 {
-            return
-        }
+        // Check on launch and periodically. The prompt, not the network check,
+        // is throttled so a newly published release is surfaced promptly.
         await performCheck(manual: false)
     }
 
@@ -69,7 +70,19 @@ final class UpdateService {
                 if manual { showUpToDate(current: current, latest: update.version) }
                 return
             }
-            presentUpdate(update, current: current)
+            if !manual {
+                if let skippedRaw = defaults.string(forKey: Self.skippedVersionDefaultsKey),
+                   let skipped = AppVersion(skippedRaw),
+                   update.version <= skipped {
+                    return
+                }
+                if defaults.string(forKey: Self.lastPromptedVersionDefaultsKey) == update.version.description,
+                   let lastPrompted = defaults.object(forKey: Self.lastPromptedAtDefaultsKey) as? Date,
+                   Date().timeIntervalSince(lastPrompted) < 24 * 60 * 60 {
+                    return
+                }
+            }
+            presentUpdate(update, current: current, manual: manual)
         } catch {
             if manual {
                 presentError(error)
@@ -79,28 +92,34 @@ final class UpdateService {
         }
     }
 
-    private func presentUpdate(_ update: UpdateRelease, current: AppVersion) {
+    private func presentUpdate(_ update: UpdateRelease, current: AppVersion, manual: Bool) {
         let notes = update.notes.trimmingCharacters(in: .whitespacesAndNewlines)
         let shortened = notes.count > 900 ? String(notes.prefix(900)) + "\n…" : notes
         let alert = NSAlert()
         alert.alertStyle = .informational
-        alert.messageText = "UU Explorer \(update.version) is available"
+        alert.messageText = "Update available"
         alert.informativeText = """
-        You’re running \(current). The update is downloaded from GitHub, checked against its published SHA-256, and verified against UULabs’ signing identity before installation.
+        UU Explorer \(update.version) is available. You’re running \(current).
+
+        The update is downloaded from GitHub, checked against its published SHA-256, and verified against UULabs’ signing identity before installation.
 
         \(shortened.isEmpty ? "See the release page for details." : shortened)
         """
-        alert.addButton(withTitle: "Download & Install")
-        alert.addButton(withTitle: "Release Notes")
+        alert.addButton(withTitle: "Install Update")
         alert.addButton(withTitle: "Later")
+        alert.addButton(withTitle: "Skip This Version")
         present(alert) { [weak self] response in
+            guard let self else { return }
             switch response {
             case .alertFirstButtonReturn:
                 Task { [weak self] in await self?.downloadAndInstall(update) }
             case .alertSecondButtonReturn:
-                NSWorkspace.shared.open(update.pageURL)
+                self.defaults.set(update.version.description, forKey: Self.lastPromptedVersionDefaultsKey)
+                self.defaults.set(Date(), forKey: Self.lastPromptedAtDefaultsKey)
             default:
-                break
+                self.defaults.set(update.version.description, forKey: Self.skippedVersionDefaultsKey)
+                self.defaults.set(update.version.description, forKey: Self.lastPromptedVersionDefaultsKey)
+                self.defaults.set(Date(), forKey: Self.lastPromptedAtDefaultsKey)
             }
         }
     }

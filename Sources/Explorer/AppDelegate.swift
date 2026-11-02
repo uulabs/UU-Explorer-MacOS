@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var activeSession: BrowserSession?
     private var updateService: UpdateService?
     private var autoUpdateMenuItem: NSMenuItem?
+    private var updateCheckTimer: Timer?
 
     private var pendingOpen: (urls: [URL], reveal: Bool)?
 
@@ -159,11 +160,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             openExternal(pending.urls, reveal: pending.reveal)
         }
 
-        if options.startURL == nil,
-           options.snapshotPath == nil {
+        if options.snapshotPath == nil {
             Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 await self?.updateService?.checkAutomatically()
+                self?.scheduleUpdateCheckTimer()
             }
         }
 
@@ -197,13 +198,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        updateCheckTimer?.invalidate()
         for session in sessions {
             session.primary.tabs.captureActiveAndSave()
             session.secondary?.tabs.captureActiveAndSave()
         }
     }
 
+    private func scheduleUpdateCheckTimer() {
+        updateCheckTimer?.invalidate()
+        updateCheckTimer = Timer.scheduledTimer(withTimeInterval: 6 * 60 * 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                await self?.updateService?.checkAutomatically()
+            }
+        }
+    }
+
     deinit {
+        updateCheckTimer?.invalidate()
         if let keyMonitor {
             NSEvent.removeMonitor(keyMonitor)
         }

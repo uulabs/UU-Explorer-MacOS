@@ -124,7 +124,7 @@ UU Explorer is non-sandboxed so it can browse the folders you open, including ex
 
 ## Automatic updates
 
-UU Explorer checks the latest **stable GitHub release** at most once per day. You can also choose **UU Explorer → Check for Updates…** at any time.
+UU Explorer checks the latest **stable GitHub release** after launch and every six hours. When a newer release exists, it presents **Install Update / Later / Skip This Version**. **Later** pauses automatic prompts for 24 hours; **Skip This Version** suppresses that version until something newer is released. You can also choose **UU Explorer → Check for Updates…** at any time.
 
 An update is offered only after the app verifies:
 
