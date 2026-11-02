@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import UniformTypeIdentifiers
 
@@ -9,7 +10,9 @@ public enum FileSystemService {
         .isSymbolicLinkKey,
         .isAliasFileKey,
         .contentModificationDateKey,
+        .creationDateKey,
         .fileSizeKey,
+        .totalFileAllocatedSizeKey,
         .typeIdentifierKey,
         .localizedNameKey
     ]
@@ -79,6 +82,20 @@ public enum FileSystemService {
             typeIdentifier: values?.typeIdentifier
         )
 
+        var permissions: String?
+        var owner: String?
+        var group: String?
+        var info = stat()
+        if stat(child.path, &info) == 0 {
+            permissions = String(format: "%03o", info.st_mode & 0o777)
+            if let password = getpwuid(info.st_uid) {
+                owner = String(cString: password.pointee.pw_name)
+            }
+            if let groupEntry = getgrgid(info.st_gid) {
+                group = String(cString: groupEntry.pointee.gr_name)
+            }
+        }
+
         return FileItem(
             url: child,
             name: displayName,
@@ -88,9 +105,15 @@ public enum FileSystemService {
             isSymbolicLink: isSymbolicLink,
             isApplication: isApplication,
             dateModified: values?.contentModificationDate,
+            dateCreated: values?.creationDate,
             byteSize: size,
+            allocatedSize: values?.totalFileAllocatedSize.map(Int64.init),
             kind: kind,
-            isImage: isImage
+            isImage: isImage,
+            typeIdentifier: values?.typeIdentifier,
+            permissions: permissions,
+            owner: owner,
+            group: group
         )
     }
 
@@ -122,6 +145,52 @@ public enum FileSystemService {
                 results.append(item)
             }
         }
+        return results
+    }
+
+    /// Recursive filename search with optional size/kind/date filters.
+    /// Content matching is handled by the app-level Spotlight search.
+    public static func search(
+        at directory: URL,
+        matching query: String,
+        includeHidden: Bool = false,
+        filter: SearchFilter = SearchFilter(),
+        limit: Int = 2_000,
+        isCancelled: @escaping () -> Bool = { false },
+        onProgress: ((_ scanned: Int, _ newItems: [FileItem]) -> Void)? = nil
+    ) -> [FileItem] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty || filter.isActive, limit > 0 else { return [] }
+
+        var options: FileManager.DirectoryEnumerationOptions = [.skipsPackageDescendants]
+        if !includeHidden { options.insert(.skipsHiddenFiles) }
+        guard let enumerator = FileManager.default.enumerator(
+            at: directory,
+            includingPropertiesForKeys: listingKeys,
+            options: options
+        ) else { return [] }
+
+        var results: [FileItem] = []
+        var pending: [FileItem] = []
+        var scanned = 0
+
+        for case let child as URL in enumerator {
+            if scanned.isMultiple(of: 64), isCancelled() { break }
+            if results.count >= limit { break }
+            scanned += 1
+            if child.lastPathComponent == ".nofollow" { continue }
+            guard let item = fileItem(at: child, includeHidden: includeHidden) else { continue }
+            if !trimmed.isEmpty && !item.name.localizedCaseInsensitiveContains(trimmed) { continue }
+            guard filter.matches(item) else { continue }
+            results.append(item)
+            pending.append(item)
+
+            if pending.count >= 24 || scanned.isMultiple(of: 512) {
+                onProgress?(scanned, pending)
+                pending.removeAll(keepingCapacity: true)
+            }
+        }
+        onProgress?(scanned, pending)
         return results
     }
 

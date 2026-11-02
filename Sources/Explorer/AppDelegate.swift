@@ -132,6 +132,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         actions.moveTabToNewWindow = { [weak self] in self?.moveActiveTabToNewWindow() }
         actions.splitViewToggle = { [weak self] in self?.toggleSplitView() }
         actions.splitViewIsActive = { [weak self] in self?.activeSession?.isSplitView ?? false }
+        actions.compareFolders = { [weak self] in self?.activeSession?.beginFolderCompare() }
+        actions.compareFoldersAvailable = { [weak self] in self?.activeSession?.canTransferToOtherPane ?? false }
+        actions.copyToOtherPane = { [weak self] in self?.activeSession?.copyActiveSelectionToOtherPane() }
+        actions.moveToOtherPane = { [weak self] in self?.activeSession?.moveActiveSelectionToOtherPane() }
+        actions.canTransferToOtherPane = { [weak self] in self?.activeSession?.canTransferToOtherPane ?? false }
         menuActions = actions
         buildMainMenu(actions: actions)
         let updateService = UpdateService(window: window)
@@ -673,6 +678,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(.separator())
         add(fileMenu, "Close Tab", #selector(ExplorerMenuActions.closeTab(_:)), target: actions, key: "w")
         add(fileMenu, "Close Window", #selector(ExplorerMenuActions.closeWindow(_:)), target: actions, key: "w", modifiers: [.command, .shift])
+        fileMenu.addItem(.separator())
+        add(fileMenu, "Copy to Other Pane", #selector(ExplorerMenuActions.copyToOtherPaneAction(_:)), target: actions, key: String(UnicodeScalar(NSF5FunctionKey)!), modifiers: [])
+        add(fileMenu, "Move to Other Pane", #selector(ExplorerMenuActions.moveToOtherPaneAction(_:)), target: actions, key: String(UnicodeScalar(NSF6FunctionKey)!), modifiers: [])
+        add(fileMenu, "Compare Folders…", #selector(ExplorerMenuActions.compareFoldersAction(_:)), target: actions, key: "c", modifiers: [.command, .option])
 
         let editMenuItem = NSMenuItem()
         let editMenu = NSMenu(title: "Edit")

@@ -1,17 +1,25 @@
 import Foundation
 
-public enum SortField: String, CaseIterable, Sendable {
+public enum SortField: String, CaseIterable, Codable, Sendable {
     case name
     case dateModified
+    case dateCreated
     case kind
     case size
+    case sizeOnDisk
+    case permissions
+    case owner
 
     public var title: String {
         switch self {
         case .name: return "Name"
         case .dateModified: return "Date Modified"
+        case .dateCreated: return "Date Created"
         case .kind: return "Type"
         case .size: return "Size"
+        case .sizeOnDisk: return "Size on Disk"
+        case .permissions: return "Permissions"
+        case .owner: return "Owner"
         }
     }
 }
@@ -37,9 +45,27 @@ public enum FileSorter {
                 if let result = optionalOrder(lhs.byteSize, rhs.byteSize, ascending: ascending) {
                     return result
                 }
+            case .sizeOnDisk:
+                if let result = optionalOrder(lhs.allocatedSize, rhs.allocatedSize, ascending: ascending) {
+                    return result
+                }
             case .dateModified:
                 if let result = optionalOrder(lhs.dateModified, rhs.dateModified, ascending: ascending) {
                     return result
+                }
+            case .dateCreated:
+                if let result = optionalOrder(lhs.dateCreated, rhs.dateCreated, ascending: ascending) {
+                    return result
+                }
+            case .permissions:
+                let result = (lhs.permissions ?? "").localizedStandardCompare(rhs.permissions ?? "")
+                if result != .orderedSame {
+                    return ascending ? result == .orderedAscending : result == .orderedDescending
+                }
+            case .owner:
+                let result = (lhs.owner ?? "").localizedCompare(rhs.owner ?? "")
+                if result != .orderedSame {
+                    return ascending ? result == .orderedAscending : result == .orderedDescending
                 }
             }
 

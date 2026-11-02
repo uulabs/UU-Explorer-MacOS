@@ -144,6 +144,7 @@ struct PathFilterField: View {
     @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.colorScheme) private var colorScheme
     @FocusState private var isFocused: Bool
+    @State private var showSearchOptions = false
 
     private var theme: ResolvedTheme { themeStore.resolved(for: colorScheme) }
 
@@ -155,6 +156,7 @@ struct PathFilterField: View {
                 } label: {
                     Label("This Folder", systemImage: model.searchScope == .folder ? "checkmark" : "folder")
                 }
+                .disabled(model.searchFilter.textMode != .name)
                 Button {
                     model.setSearchScope(.recursive)
                 } label: {
@@ -185,7 +187,7 @@ struct PathFilterField: View {
             .foregroundStyle(theme.toolbarText)
             .focused($isFocused)
             .onExitCommand {
-                model.setFilter("")
+                model.clearSearch()
             }
             .onChange(of: isFocused) { _, focused in
                 if focused {
@@ -193,7 +195,25 @@ struct PathFilterField: View {
                 }
             }
 
-            if !model.filterText.isEmpty {
+            Button {
+                showSearchOptions.toggle()
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(
+                        model.searchFilter.isActive || model.searchFilter.textMode != .name
+                            ? theme.accent
+                            : theme.toolbarText.opacity(0.62)
+                    )
+            }
+            .buttonStyle(.plain)
+            .help("Search options")
+            .popover(isPresented: $showSearchOptions, arrowEdge: .bottom) {
+                SearchOptionsView(model: model)
+                    .environmentObject(themeStore)
+            }
+
+            if model.hasSearchCriteria {
                 Button {
                     model.saveCurrentSearch()
                 } label: {
@@ -205,7 +225,7 @@ struct PathFilterField: View {
                 .help("Save this search")
 
                 Button {
-                    model.setFilter("")
+                    model.clearSearch()
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 11))
@@ -216,7 +236,7 @@ struct PathFilterField: View {
             }
         }
         .padding(.horizontal, 7)
-        .frame(width: 220, height: 26)
+        .frame(width: 248, height: 26)
         .background(
             RoundedRectangle(cornerRadius: 6)
                 .fill(theme.field)
@@ -257,11 +277,24 @@ struct MoreMenu: View {
             Menu("Sort By") {
                 sortButton("Name", field: .name)
                 sortButton("Date Modified", field: .dateModified)
+                sortButton("Date Created", field: .dateCreated)
                 sortButton("Type", field: .kind)
                 sortButton("Size", field: .size)
+                sortButton("Size on Disk", field: .sizeOnDisk)
+                sortButton("Permissions", field: .permissions)
+                sortButton("Owner", field: .owner)
                 Divider()
                 Button(model.sortAscending ? "Descending" : "Ascending") {
                     model.setSort(field: model.sortField, ascending: !model.sortAscending)
+                }
+            }
+            Menu("Columns") {
+                ForEach(ExplorerColumn.allCases) { column in
+                    Button {
+                        model.toggleColumn(column)
+                    } label: {
+                        Label(column.title, systemImage: model.visibleColumns.contains(column) ? "checkmark" : "square")
+                    }
                 }
             }
             Divider()
@@ -317,7 +350,8 @@ struct MoreMenu: View {
                     Button("Share…") { model.shareSelection() }
                 }
             }
-            if !model.filterText.isEmpty {
+            Button("Find Large Files (100 MB+)") { model.findLargeFiles() }
+            if model.hasSearchCriteria {
                 Button("Save Search") { model.saveCurrentSearch() }
             }
             Button(model.currentFolderIsFavorite ? "Remove Current Folder from Favourites" : "Pin Current Folder to Favourites") {

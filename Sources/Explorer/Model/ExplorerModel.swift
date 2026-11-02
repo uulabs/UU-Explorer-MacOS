@@ -24,7 +24,59 @@ struct TreeRoot: Identifiable, Hashable {
     var id: String { url.path }
 }
 
-enum ViewMode: String, CaseIterable, Identifiable {
+enum ExplorerColumn: String, CaseIterable, Identifiable {
+    case dateModified
+    case kind
+    case size
+    case dateCreated
+    case sizeOnDisk
+    case permissions
+    case owner
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .dateModified: return "Date Modified"
+        case .kind: return "Type"
+        case .size: return "Size"
+        case .dateCreated: return "Date Created"
+        case .sizeOnDisk: return "Size on Disk"
+        case .permissions: return "Permissions"
+        case .owner: return "Owner"
+        }
+    }
+
+    var width: CGFloat {
+        switch self {
+        case .dateModified, .dateCreated: return 155
+        case .kind: return 135
+        case .size, .sizeOnDisk: return 100
+        case .permissions: return 92
+        case .owner: return 110
+        }
+    }
+
+    var sortField: SortField {
+        switch self {
+        case .dateModified: return .dateModified
+        case .kind: return .kind
+        case .size: return .size
+        case .dateCreated: return .dateCreated
+        case .sizeOnDisk: return .sizeOnDisk
+        case .permissions: return .permissions
+        case .owner: return .owner
+        }
+    }
+
+    var alignment: NSTextAlignment {
+        self == .size || self == .sizeOnDisk ? .right : .left
+    }
+
+    static let defaultVisible: Set<ExplorerColumn> = [.dateModified, .kind, .size]
+}
+
+enum ViewMode: String, CaseIterable, Identifiable, Codable {
     case details
     case gallery
 
@@ -113,6 +165,14 @@ struct SavedSearch: Identifiable, Codable, Equatable {
     var rootPath: String
     var query: String
     var scope: SearchScope
+    var filter: SearchFilter?
+}
+
+struct FolderViewState: Codable, Equatable {
+    var viewMode: String
+    var sortField: String
+    var sortAscending: Bool
+    var columns: [String]?
 }
 
 struct ExplorerStatus: Identifiable, Equatable {
@@ -193,11 +253,14 @@ final class ExplorerModel: ObservableObject {
     @Published private(set) var isSidebarVisible: Bool
     @Published private(set) var sidebarWidth: CGFloat
     @Published private(set) var viewMode: ViewMode
+    @Published private(set) var visibleColumns: Set<ExplorerColumn>
     @Published private(set) var galleryThumbnailSize: CGFloat
     @Published private(set) var favorites: [URL]
     @Published private(set) var isPreviewPaneVisible: Bool
     @Published private(set) var searchScope: SearchScope
+    @Published private(set) var searchFilter: SearchFilter
     @Published private(set) var isSearching = false
+    @Published private(set) var searchScanned = 0
     @Published private(set) var savedSearches: [SavedSearch]
     @Published private(set) var networkLocations: [NetworkLocation]
     @Published private(set) var customActions: [CustomAction]
@@ -228,8 +291,11 @@ final class ExplorerModel: ObservableObject {
     private var statusTask: Task<Void, Never>?
     private var revealTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
+    private var searchCancellation: SearchCancellation?
     private var searchResults: [FileItem] = []
     private var searchGeneration = 0
+    private var folderViewStates: [String: FolderViewState] = [:]
+    private var restoringFolderView = false
     private var folderSizeTask: Task<Void, Never>?
     private var folderSizeWorker: Task<FolderSize, Never>?
     private var folderSizeGeneration = 0
@@ -244,6 +310,7 @@ final class ExplorerModel: ObservableObject {
 
     let operations = FileOperationQueue()
     var openInNewTabHandler: ((URL) -> Void)?
+    var transferToOtherPaneHandler: ((Bool) -> Void)?
 
     @Published private(set) var undoTitle: String?
     @Published private(set) var redoTitle: String?
@@ -267,10 +334,21 @@ final class ExplorerModel: ObservableObject {
         let storedWidth = defaults.object(forKey: "Explorer.sidebarWidth") as? Double ?? 236
         self.sidebarWidth = CGFloat(min(max(storedWidth, 190), 420))
         self.viewMode = defaults.string(forKey: "UUExplorer.viewMode").flatMap(ViewMode.init(rawValue:)) ?? .details
+        if let storedColumns = defaults.array(forKey: "UUExplorer.visibleColumns.v1") as? [String] {
+            self.visibleColumns = Set(storedColumns.compactMap(ExplorerColumn.init(rawValue:)))
+        } else {
+            self.visibleColumns = ExplorerColumn.defaultVisible
+        }
         let storedThumbnailSize = defaults.object(forKey: "UUExplorer.galleryThumbnailSize") as? Double ?? 146
         self.galleryThumbnailSize = CGFloat(min(max(storedThumbnailSize, 110), 220))
         self.isPreviewPaneVisible = defaults.bool(forKey: "UUExplorer.previewPane")
         self.searchScope = defaults.string(forKey: "UUExplorer.searchScope").flatMap(SearchScope.init(rawValue:)) ?? .folder
+        if let data = defaults.data(forKey: "UUExplorer.searchFilter.v1"),
+           let decoded = try? JSONDecoder().decode(SearchFilter.self, from: data) {
+            self.searchFilter = decoded
+        } else {
+            self.searchFilter = SearchFilter()
+        }
         if let data = defaults.data(forKey: "UUExplorer.savedSearches.v1"),
            let decoded = try? JSONDecoder().decode([SavedSearch].self, from: data) {
             self.savedSearches = decoded
@@ -284,6 +362,10 @@ final class ExplorerModel: ObservableObject {
             self.networkLocations = []
         }
         self.verifyTransfers = defaults.bool(forKey: "UUExplorer.verifyTransfers")
+        if let data = defaults.data(forKey: "UUExplorer.folderViews.v1"),
+           let decoded = try? JSONDecoder().decode([String: FolderViewState].self, from: data) {
+            self.folderViewStates = decoded
+        }
         self.customActions = Self.loadCustomActions()
         let storedFavorites = defaults.array(forKey: "UUExplorer.favorites.v1") as? [String] ?? []
         self.favorites = storedFavorites
@@ -320,6 +402,9 @@ final class ExplorerModel: ObservableObject {
             history = [startDirectory]
             historyIndex = 0
         }
+        if startDirectory.path == currentURL.path {
+            restoreViewSettings(for: startDirectory)
+        }
         expandedPaths.insert("/")
         Task { await loadTreeChildren(path: "/") }
         openDirectory(startDirectory, pushHistory: false, selecting: nil)
@@ -353,8 +438,11 @@ final class ExplorerModel: ObservableObject {
         volume?.name ?? "Macintosh HD"
     }
 
-    var isFiltering: Bool { !filterText.isEmpty }
-    var isRecursiveSearchActive: Bool { searchScope == .recursive && !filterText.isEmpty }
+    var hasSearchCriteria: Bool {
+        !filterText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || searchFilter.isActive
+    }
+    var isFiltering: Bool { hasSearchCriteria }
+    var isRecursiveSearchActive: Bool { searchScope == .recursive && hasSearchCriteria }
 
     // MARK: Navigation
 
@@ -498,7 +586,7 @@ final class ExplorerModel: ObservableObject {
         guard text != filterText else { return }
         filterText = text
 
-        if text.isEmpty {
+        if !hasSearchCriteria {
             cancelRecursiveSearch()
             rebuildVisibleItems()
         } else if searchScope == .recursive {
@@ -514,7 +602,7 @@ final class ExplorerModel: ObservableObject {
         searchScope = scope
         defaults.set(scope.rawValue, forKey: "UUExplorer.searchScope")
 
-        if filterText.isEmpty {
+        if !hasSearchCriteria {
             cancelRecursiveSearch()
             rebuildVisibleItems()
         } else if scope == .recursive {
@@ -525,13 +613,54 @@ final class ExplorerModel: ObservableObject {
         }
     }
 
+    func setSearchFilter(_ filter: SearchFilter) {
+        searchFilter = filter
+        if filter.textMode != .name, searchScope == .folder {
+            searchScope = .recursive
+            defaults.set(searchScope.rawValue, forKey: "UUExplorer.searchScope")
+        }
+        if let data = try? JSONEncoder().encode(filter) {
+            defaults.set(data, forKey: "UUExplorer.searchFilter.v1")
+        }
+        if searchScope == .recursive, hasSearchCriteria {
+            scheduleRecursiveSearch()
+        } else {
+            cancelRecursiveSearch()
+            rebuildVisibleItems()
+        }
+    }
+
+    func clearSearch() {
+        filterText = ""
+        searchFilter = SearchFilter()
+        if let data = try? JSONEncoder().encode(searchFilter) {
+            defaults.set(data, forKey: "UUExplorer.searchFilter.v1")
+        }
+        cancelRecursiveSearch()
+        rebuildVisibleItems()
+    }
+
+    func findLargeFiles(minimumSize: Int64 = 100 * 1_024 * 1_024) {
+        searchScope = .recursive
+        defaults.set(searchScope.rawValue, forKey: "UUExplorer.searchScope")
+        setSearchFilter(SearchFilter(textMode: .name, minimumSize: minimumSize))
+        filterText = ""
+        sortField = .size
+        sortAscending = false
+        defaults.set(sortField.rawValue, forKey: "Explorer.sortField")
+        defaults.set(sortAscending, forKey: "Explorer.sortAscending")
+        scheduleRecursiveSearch()
+    }
+
     func saveCurrentSearch() {
+        guard hasSearchCriteria else { return }
         let query = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return }
         let root = currentURL.standardizedFileURL
-        let name = "\(query) in \(currentFolderName)"
+        let name = query.isEmpty
+            ? "Large files in \(currentFolderName)"
+            : "\(query) in \(currentFolderName)"
         if let index = savedSearches.firstIndex(where: {
-            $0.rootPath == root.path && $0.query == query && $0.scope == searchScope
+            $0.rootPath == root.path && $0.query == query && $0.scope == searchScope && $0.filter == searchFilter
         }) {
             savedSearches[index].name = name
         } else {
@@ -541,7 +670,8 @@ final class ExplorerModel: ObservableObject {
                     name: name,
                     rootPath: root.path,
                     query: query,
-                    scope: searchScope
+                    scope: searchScope,
+                    filter: searchFilter
                 )
             )
         }
@@ -558,11 +688,13 @@ final class ExplorerModel: ObservableObject {
             return
         }
         searchScope = search.scope
+        searchFilter = search.filter ?? SearchFilter()
         openDirectory(root, pushHistory: true, selecting: nil)
         filterText = search.query
-        if search.scope == .recursive {
+        if search.scope == .recursive, hasSearchCriteria {
             scheduleRecursiveSearch()
         } else {
+            cancelRecursiveSearch()
             rebuildVisibleItems()
         }
     }
@@ -579,44 +711,78 @@ final class ExplorerModel: ObservableObject {
 
     private func scheduleRecursiveSearch() {
         searchTask?.cancel()
+        searchCancellation?.cancel()
         searchGeneration &+= 1
         let generation = searchGeneration
         let root = currentURL.standardizedFileURL
         let query = filterText
+        let filter = searchFilter
         let hidden = showHidden
+        let cancellation = SearchCancellation()
+        searchCancellation = cancellation
 
         isSearching = true
+        searchScanned = 0
         searchResults = []
         displayedItems = []
         selection = []
 
         searchTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 220_000_000)
+            try? await Task.sleep(nanoseconds: 180_000_000)
             guard let self, !Task.isCancelled, generation == self.searchGeneration else { return }
-            let results = await Task.detached(priority: .userInitiated) {
-                FileSystemService.recursiveSearch(
-                    at: root,
-                    matching: query,
-                    includeHidden: hidden
-                )
-            }.value
+
+            let stream = SearchService.searchStream(
+                root: root,
+                query: query,
+                filter: filter,
+                includeHidden: hidden,
+                cancellation: cancellation
+            )
+            var lastStatusCount = -1
+
+            for await update in stream {
+                guard !Task.isCancelled, generation == self.searchGeneration else { break }
+                self.searchScanned = update.scanned
+                if !update.items.isEmpty {
+                    self.searchResults.append(contentsOf: update.items)
+                    self.rebuildVisibleItems()
+                }
+                if update.isFinal || update.scanned == 0 || update.scanned - lastStatusCount >= 512 {
+                    lastStatusCount = update.scanned
+                    self.showStatus(
+                        "Searching… \(update.scanned.formatted()) items scanned, \(self.searchResults.count.formatted()) found"
+                    )
+                }
+            }
+
             guard !Task.isCancelled, generation == self.searchGeneration else { return }
-            self.searchResults = results
             self.isSearching = false
-            self.rebuildVisibleItems()
+            self.searchCancellation = nil
+            let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            let description: String
+            if !trimmed.isEmpty {
+                description = filter.textMode == .name ? "“\(trimmed)”" : "“\(trimmed)” in contents"
+            } else if let minimumSize = filter.minimumSize {
+                description = "files over \(ByteFormat.string(minimumSize))"
+            } else {
+                description = "search filters"
+            }
             self.showStatus(
-                results.isEmpty
-                    ? "No matches for “\(query)”"
-                    : "\(results.count) result\(results.count == 1 ? "" : "s") for “\(query)”"
+                self.searchResults.isEmpty
+                    ? "No matches for \(description)"
+                    : "\(self.searchResults.count) result\(self.searchResults.count == 1 ? "" : "s") for \(description)"
             )
         }
     }
 
     private func cancelRecursiveSearch() {
         searchGeneration &+= 1
+        searchCancellation?.cancel()
+        searchCancellation = nil
         searchTask?.cancel()
         searchTask = nil
         isSearching = false
+        searchScanned = 0
         searchResults = []
     }
 
@@ -626,6 +792,7 @@ final class ExplorerModel: ObservableObject {
         sortAscending = ascending
         defaults.set(field.rawValue, forKey: "Explorer.sortField")
         defaults.set(ascending, forKey: "Explorer.sortAscending")
+        rememberViewSettings(for: currentURL)
         rebuildVisibleItems()
     }
 
@@ -667,10 +834,59 @@ final class ExplorerModel: ObservableObject {
         defaults.set(Double(clamped), forKey: "Explorer.sidebarWidth")
     }
 
+    var columnSignature: String {
+        visibleColumns.map(\.rawValue).sorted().joined(separator: ",")
+    }
+
+    func toggleColumn(_ column: ExplorerColumn) {
+        if visibleColumns.contains(column) {
+            visibleColumns.remove(column)
+        } else {
+            visibleColumns.insert(column)
+        }
+        defaults.set(visibleColumns.map(\.rawValue), forKey: "UUExplorer.visibleColumns.v1")
+        rememberViewSettings(for: currentURL)
+    }
+
+    func rememberViewSettings(for url: URL) {
+        guard !restoringFolderView else { return }
+        folderViewStates[url.path] = FolderViewState(
+            viewMode: viewMode.rawValue,
+            sortField: sortField.rawValue,
+            sortAscending: sortAscending,
+            columns: visibleColumns.map(\.rawValue).sorted()
+        )
+        if folderViewStates.count > 500 {
+            for key in folderViewStates.keys.prefix(folderViewStates.count - 500) {
+                folderViewStates.removeValue(forKey: key)
+            }
+        }
+        if let data = try? JSONEncoder().encode(folderViewStates) {
+            defaults.set(data, forKey: "UUExplorer.folderViews.v1")
+        }
+    }
+
+    private func restoreViewSettings(for url: URL) {
+        guard let state = folderViewStates[url.path] else { return }
+        restoringFolderView = true
+        viewMode = ViewMode(rawValue: state.viewMode) ?? viewMode
+        sortField = SortField(rawValue: state.sortField) ?? sortField
+        sortAscending = state.sortAscending
+        if let columns = state.columns {
+            let restored = Set(columns.compactMap(ExplorerColumn.init(rawValue:)))
+            if !restored.isEmpty { visibleColumns = restored }
+        }
+        restoringFolderView = false
+        defaults.set(viewMode.rawValue, forKey: "UUExplorer.viewMode")
+        defaults.set(sortField.rawValue, forKey: "Explorer.sortField")
+        defaults.set(sortAscending, forKey: "Explorer.sortAscending")
+    }
+
     func setViewMode(_ mode: ViewMode) {
         guard mode != viewMode else { return }
         viewMode = mode
         defaults.set(mode.rawValue, forKey: "UUExplorer.viewMode")
+        rememberViewSettings(for: currentURL)
     }
 
     // MARK: Tabs
@@ -1318,13 +1534,19 @@ final class ExplorerModel: ObservableObject {
         defaults.set(verifyTransfers, forKey: "UUExplorer.verifyTransfers")
     }
 
-    func transfer(_ urls: [URL], to destination: URL, copy: Bool) {
+    func transfer(
+        _ urls: [URL],
+        to destination: URL,
+        copy: Bool,
+        completion: (() -> Void)? = nil
+    ) {
         performTransfer(
             urls,
             to: destination,
             isCut: !copy,
             successVerb: copy ? "Copied" : "Moved",
-            clearCutPasteboard: false
+            clearCutPasteboard: false,
+            completion: completion
         )
     }
 
@@ -1333,7 +1555,8 @@ final class ExplorerModel: ObservableObject {
         to requestedDestination: URL,
         isCut: Bool,
         successVerb: String,
-        clearCutPasteboard: Bool
+        clearCutPasteboard: Bool,
+        completion: (() -> Void)? = nil
     ) {
         let destination = requestedDestination.standardizedFileURL
         var isDirectory: ObjCBool = false
@@ -1384,6 +1607,7 @@ final class ExplorerModel: ObservableObject {
             if !outcome.cancelled {
                 self.registerTransferUndo(isCut: isCut, pairs: outcome.pairs)
             }
+            completion?()
         }
     }
 
@@ -2087,7 +2311,11 @@ final class ExplorerModel: ObservableObject {
         storageSizeWorker = nil
         isCalculatingStorageSize = false
         storageFolderSize = nil
+        if changed {
+            rememberViewSettings(for: currentURL)
+        }
         currentURL = directory
+        restoreViewSettings(for: directory)
         volume = FileSystemService.volumeInfo(for: directory)
         currentFolderName = displayName(for: directory)
         isEditingPath = false
@@ -2169,6 +2397,9 @@ final class ExplorerModel: ObservableObject {
             } else {
                 self.selection = self.selection.intersection(itemIDs)
             }
+            if self.isRecursiveSearchActive {
+                self.scheduleRecursiveSearch()
+            }
         }
     }
 
@@ -2181,10 +2412,14 @@ final class ExplorerModel: ObservableObject {
         let filtered: [FileItem]
         if isRecursiveSearchActive {
             filtered = searchResults
-        } else if filterText.isEmpty {
-            filtered = items
+        } else if hasSearchCriteria {
+            let query = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
+            filtered = items.filter { item in
+                (query.isEmpty || item.name.localizedCaseInsensitiveContains(query))
+                    && searchFilter.matches(item)
+            }
         } else {
-            filtered = items.filter { $0.name.localizedCaseInsensitiveContains(filterText) }
+            filtered = items
         }
         let sorted = FileSorter.sorted(filtered, by: sortField, ascending: sortAscending)
         displayedItems = sorted

@@ -6,7 +6,7 @@
 
 <p align="center">
   A native, Windows Explorer-style file browser for macOS.<br>
-  Fast keyboard navigation, tabs and split panes, recursive search, batch rename, folder sizes, archive browsing, user-defined actions, and a real command palette.
+  Fast keyboard navigation, tabs and split panes, Spotlight search, custom columns, batch rename, folder sizes, archive browsing, user-defined actions, and a real command palette.
 </p>
 
 <p align="center">
@@ -47,7 +47,8 @@ UU Explorer is a real AppKit/SwiftUI application, not a Finder skin. It brings t
 
 ### Find and organize
 
-- **Recursive search** from the filter field with a scope switch and a 2,000-result safety cap.
+- **Filename and content search** with a filter builder for size, kind, modified date, and scope.
+- **Large-file search** that walks the folder tree directly and works on unindexed volumes.
 - **Saved searches** in the sidebar, with one-click reruns.
 - **Archive browser** for ZIP, TAR, RAR, and 7-Zip contents without extracting the whole archive.
 - **Batch rename** with live preview for find/replace, prefix/suffix, or numbering.
@@ -59,6 +60,10 @@ UU Explorer is a real AppKit/SwiftUI application, not a Finder skin. It brings t
 
 - **Byte-level operation queue** with speed, ETA, pause/resume, cancel, and Replace / Keep Both / Skip / Apply to All conflict handling.
 - **Transfer verification** via SHA-256 tree comparison, enabled from the More menu or command palette.
+- **Dual-pane F5/F6** copy and move between panes.
+- **Folder comparison sheet** for left-only, right-only, changed, and identical entries, with copy-left/right actions.
+- **Metadata inspector** for POSIX permissions, owner/group, hard links, xattrs, ACLs, symlinks, quarantine, image metadata, and streamed SHA-256.
+- **Custom details columns** for date created, size on disk, permissions, and owner, plus per-folder view/sort memory.
 - **Archive browser** with selective Open and Extract Selected, without unpacking unrelated files.
 - **Custom shell actions** with Selected Items or Current Folder scope, optional Terminal execution, and a persistent manager.
 - **Copy Path As** POSIX, File URL, shell-quoted, or JSON.
@@ -94,6 +99,14 @@ UU Explorer is a real AppKit/SwiftUI application, not a Finder skin. It brings t
 ### Custom actions
 
 <a href="Screenshots/custom-actions.png"><img src="Screenshots/custom-actions.png" alt="Custom shell action manager"></a>
+
+### Custom columns
+
+<a href="Screenshots/columns.png"><img src="Screenshots/columns.png" alt="Custom details columns"></a>
+
+### Folder compare
+
+<a href="Screenshots/folder-compare.png"><img src="Screenshots/folder-compare.png" alt="Folder comparison with left and right panes"></a>
 
 ## Install
 
@@ -222,7 +235,7 @@ scripts/                     Portable app, DMG, release, test, and icon scripts
 swift test
 ```
 
-The repository includes 59 `ExplorerCore` tests covering path handling, sorting, archive round-trips, archive entry selection, search, batch rename planning, folder sizes, volume metadata, network address parsing, transfer byte accounting and verification, and update release/checksum selection.
+The repository includes 66 `ExplorerCore` tests covering path handling, sorting, archive round-trips, archive entry selection, search filters, folder comparison, batch rename planning, folder sizes, volume metadata, network address parsing, transfer byte accounting and verification, file hashing, and update release/checksum selection.
 
 ## Security and privacy
 

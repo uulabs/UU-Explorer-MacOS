@@ -352,6 +352,7 @@ struct FileTableView: NSViewRepresentable {
         private var theme: ResolvedTheme?
         private var lastThemeSignature: String?
         private var lastFolderSizeSignature = ""
+        private var lastColumnSignature = ""
         private let fallbackTheme = ResolvedTheme(settings: .default, mode: .light)
 
         init(model: ExplorerModel) {
@@ -359,39 +360,36 @@ struct FileTableView: NSViewRepresentable {
         }
 
         func configureColumns(in tableView: NSTableView) {
+            for column in tableView.tableColumns {
+                tableView.removeTableColumn(column)
+            }
+
             let name = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
             name.title = "Name"
-            name.width = 360
+            name.width = 340
             name.minWidth = 180
             name.maxWidth = 2000
             name.resizingMask = [.userResizingMask, .autoresizingMask]
             name.sortDescriptorPrototype = NSSortDescriptor(key: SortField.name.rawValue, ascending: true)
+            tableView.addTableColumn(name)
 
-            let date = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("dateModified"))
-            date.title = "Date Modified"
-            date.width = 165
-            date.minWidth = 110
-            date.resizingMask = [.userResizingMask]
-            date.sortDescriptorPrototype = NSSortDescriptor(key: SortField.dateModified.rawValue, ascending: true)
+            for column in ExplorerColumn.allCases where model.visibleColumns.contains(column) {
+                let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(column.rawValue))
+                tableColumn.title = column.title
+                tableColumn.width = column.width
+                tableColumn.minWidth = column == .permissions ? 80 : 70
+                tableColumn.resizingMask = [.userResizingMask]
+                tableColumn.headerCell.alignment = column.alignment
+                tableColumn.sortDescriptorPrototype = NSSortDescriptor(
+                    key: column.sortField.rawValue,
+                    ascending: true
+                )
+                tableView.addTableColumn(tableColumn)
+            }
 
-            let kind = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("kind"))
-            kind.title = "Type"
-            kind.width = 150
-            kind.minWidth = 90
-            kind.resizingMask = [.userResizingMask]
-            kind.sortDescriptorPrototype = NSSortDescriptor(key: SortField.kind.rawValue, ascending: true)
-
-            let size = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("size"))
-            size.title = "Size"
-            size.width = 100
-            size.minWidth = 70
-            size.resizingMask = [.userResizingMask]
-            size.headerCell.alignment = .right
-            size.sortDescriptorPrototype = NSSortDescriptor(key: SortField.size.rawValue, ascending: true)
-
-            [name, date, kind, size].forEach(tableView.addTableColumn)
+            lastColumnSignature = model.columnSignature
             tableView.sortDescriptors = [
-                NSSortDescriptor(key: SortField.name.rawValue, ascending: true)
+                NSSortDescriptor(key: model.sortField.rawValue, ascending: model.sortAscending)
             ]
         }
 
@@ -399,6 +397,11 @@ struct FileTableView: NSViewRepresentable {
             self.model = model
             self.theme = theme
             applyThemeIfNeeded(theme)
+            if lastColumnSignature != model.columnSignature, let tableView {
+                configureColumns(in: tableView)
+                tableView.reloadData()
+                fitColumns()
+            }
             let newItems = model.displayedItems
             let newIDs = newItems.map(\.id)
             let oldIDs = items.map(\.id)
@@ -474,9 +477,8 @@ struct FileTableView: NSViewRepresentable {
             let available = scrollView.contentSize.width
             guard available > 200 else { return }
             let columns = tableView.tableColumns
-            guard columns.count >= 4 else { return }
-            let name = columns[0]
-            let fixedWidth = columns[1].width + columns[2].width + columns[3].width
+            guard columns.count >= 2, let name = columns.first else { return }
+            let fixedWidth = columns.dropFirst().reduce(CGFloat(0)) { $0 + $1.width }
             let gaps = tableView.intercellSpacing.width * CGFloat(columns.count + 1)
             let target = max(name.minWidth, available - fixedWidth - gaps - 1)
             guard abs(name.width - target) > 0.5 else { return }
@@ -579,6 +581,62 @@ struct FileTableView: NSViewRepresentable {
                     cell.label.stringValue = ByteFormat.string(item.byteSize)
                     cell.label.toolTip = item.byteSize.map(ByteFormat.exact) ?? ""
                 }
+                return cell
+
+            case "dateCreated":
+                let cell = textCell(
+                    in: tableView,
+                    identifier: "Explorer.DateCreatedCell",
+                    alignment: .left,
+                    color: .secondaryLabelColor
+                )
+                cell.label.stringValue = item.dateCreated?.formatted(date: .numeric, time: .shortened) ?? "—"
+                cell.label.toolTip = cell.label.stringValue
+                return cell
+
+            case "sizeOnDisk":
+                let cell = textCell(
+                    in: tableView,
+                    identifier: "Explorer.SizeOnDiskCell",
+                    alignment: .right,
+                    color: .labelColor,
+                    monospacedDigits: true
+                )
+                if item.isDirectory {
+                    if let folderSize = model.folderSizes[item.url.path] {
+                        cell.label.stringValue = ByteFormat.string(folderSize.allocatedBytes)
+                        cell.label.toolTip = ByteFormat.exact(folderSize.allocatedBytes)
+                    } else {
+                        cell.label.stringValue = "—"
+                        cell.label.toolTip = "Calculate folder sizes to measure allocated size."
+                    }
+                } else {
+                    cell.label.stringValue = ByteFormat.string(item.allocatedSize)
+                    cell.label.toolTip = item.allocatedSize.map(ByteFormat.exact) ?? ""
+                }
+                return cell
+
+            case "permissions":
+                let cell = textCell(
+                    in: tableView,
+                    identifier: "Explorer.PermissionsCell",
+                    alignment: .left,
+                    color: .secondaryLabelColor,
+                    monospacedDigits: true
+                )
+                cell.label.stringValue = item.permissions ?? "—"
+                cell.label.toolTip = item.permissions ?? "Unavailable"
+                return cell
+
+            case "owner":
+                let cell = textCell(
+                    in: tableView,
+                    identifier: "Explorer.OwnerCell",
+                    alignment: .left,
+                    color: .secondaryLabelColor
+                )
+                cell.label.stringValue = item.owner ?? "—"
+                cell.label.toolTip = item.owner ?? "Unavailable"
                 return cell
 
             default:
@@ -685,12 +743,16 @@ struct FileTableView: NSViewRepresentable {
             case 120: // F2
                 model.beginRenameSelected()
                 return true
+            case 96, 97: // F5 copy / F6 move to the other pane
+                guard let transfer = model.transferToOtherPaneHandler else { return false }
+                transfer(event.keyCode == 96)
+                return true
             case 51 where event.modifierFlags.contains(.command): // ⌘⌫
                 model.moveSelectionToTrash()
                 return true
             case 53: // Escape
                 if model.isFiltering {
-                    model.setFilter("")
+                    model.clearSearch()
                     return true
                 }
                 return false

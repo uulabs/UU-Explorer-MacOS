@@ -105,9 +105,14 @@ struct FileContentView: View {
             VStack(spacing: 9) {
                 ProgressView()
                     .controlSize(.large)
-                Text("Searching…")
+                Text(model.searchScanned > 0
+                    ? "Searching… \(model.searchScanned.formatted()) items scanned"
+                    : "Searching…")
                     .font(.system(size: 11.5))
                     .foregroundStyle(theme.contentSecondary)
+                Button("Stop Search") { model.clearSearch() }
+                    .buttonStyle(.link)
+                    .font(.system(size: 10.5))
             }
         } else if model.isLoading {
             ProgressView()

@@ -21,6 +21,9 @@ struct WindowRootView: View {
                 RootView(model: session.primary.model, tabs: session.primary.tabs)
             }
         }
+        .sheet(isPresented: $session.isShowingFolderCompare) {
+            FolderCompareView(session: session)
+        }
     }
 }
 

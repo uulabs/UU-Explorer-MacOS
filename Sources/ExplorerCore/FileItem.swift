@@ -9,9 +9,15 @@ public struct FileItem: Identifiable, Hashable, Sendable {
     public let isSymbolicLink: Bool
     public let isApplication: Bool
     public let dateModified: Date?
+    public let dateCreated: Date?
     public let byteSize: Int64?
+    public let allocatedSize: Int64?
     public let kind: String
     public let isImage: Bool
+    public let typeIdentifier: String?
+    public let permissions: String?
+    public let owner: String?
+    public let group: String?
 
     public var id: String { url.path }
 
@@ -24,9 +30,15 @@ public struct FileItem: Identifiable, Hashable, Sendable {
         isSymbolicLink: Bool,
         isApplication: Bool,
         dateModified: Date?,
+        dateCreated: Date? = nil,
         byteSize: Int64?,
+        allocatedSize: Int64? = nil,
         kind: String,
-        isImage: Bool = false
+        isImage: Bool = false,
+        typeIdentifier: String? = nil,
+        permissions: String? = nil,
+        owner: String? = nil,
+        group: String? = nil
     ) {
         self.url = url
         self.name = name
@@ -36,9 +48,15 @@ public struct FileItem: Identifiable, Hashable, Sendable {
         self.isSymbolicLink = isSymbolicLink
         self.isApplication = isApplication
         self.dateModified = dateModified
+        self.dateCreated = dateCreated
         self.byteSize = byteSize
+        self.allocatedSize = allocatedSize
         self.kind = kind
         self.isImage = isImage
+        self.typeIdentifier = typeIdentifier
+        self.permissions = permissions
+        self.owner = owner
+        self.group = group
     }
 }
 

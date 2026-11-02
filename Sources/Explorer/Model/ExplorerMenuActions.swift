@@ -9,6 +9,11 @@ final class ExplorerMenuActions: NSObject, NSMenuItemValidation {
     var moveTabToNewWindow: (() -> Void)?
     var splitViewToggle: (() -> Void)?
     var splitViewIsActive: (() -> Bool)?
+    var compareFolders: (() -> Void)?
+    var compareFoldersAvailable: (() -> Bool)?
+    var copyToOtherPane: (() -> Void)?
+    var moveToOtherPane: (() -> Void)?
+    var canTransferToOtherPane: (() -> Bool)?
 
     init(model: ExplorerModel, tabs: TabManager? = nil) {
         self.model = model
@@ -43,6 +48,9 @@ final class ExplorerMenuActions: NSObject, NSMenuItemValidation {
     @objc func newWindow(_ sender: Any?) { newWindow?() }
     @objc func moveTabToNewWindow(_ sender: Any?) { moveTabToNewWindow?() }
     @objc func toggleSplitView(_ sender: Any?) { splitViewToggle?() }
+    @objc func compareFoldersAction(_ sender: Any?) { compareFolders?() }
+    @objc func copyToOtherPaneAction(_ sender: Any?) { copyToOtherPane?() }
+    @objc func moveToOtherPaneAction(_ sender: Any?) { moveToOtherPane?() }
     @objc func newTab(_ sender: Any?) { tabs?.newTab() }
     @objc func closeTab(_ sender: Any?) { tabs?.closeActiveTab() }
     @objc func nextTab(_ sender: Any?) { tabs?.selectNextTab() }
@@ -115,6 +123,10 @@ final class ExplorerMenuActions: NSObject, NSMenuItemValidation {
         case #selector(toggleSplitView(_:)):
             menuItem.state = (splitViewIsActive?() ?? false) ? .on : .off
             return canAct
+        case #selector(compareFoldersAction(_:)):
+            return canAct && (compareFoldersAvailable?() ?? false)
+        case #selector(copyToOtherPaneAction(_:)), #selector(moveToOtherPaneAction(_:)):
+            return canAct && (canTransferToOtherPane?() ?? false) && hasSelection
         case #selector(newTab(_:)), #selector(closeTab(_:)):
             return canAct
         case #selector(nextTab(_:)), #selector(previousTab(_:)):

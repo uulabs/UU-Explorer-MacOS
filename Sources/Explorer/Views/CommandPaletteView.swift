@@ -78,6 +78,9 @@ struct CommandPaletteView: View {
             command("browse-archive", "Browse Archive…", "Inspect and selectively extract archive contents", "archivebox", enabled: model.selectedItems.count == 1 && model.selectedItems.first.map { ArchiveService.isArchive($0.url) } == true) {
                 model.beginArchiveBrowsing()
             },
+            command("find-large-files", "Find Large Files", "Search recursively for files over 100 MB", "externaldrive.badge.questionmark") {
+                model.findLargeFiles()
+            },
             command("folder-size", "Calculate Folder Sizes", "Measure visible folders", "externaldrive") {
                 model.calculateVisibleFolderSizes()
             },

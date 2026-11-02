@@ -1,7 +1,10 @@
 import AppKit
 import Combine
+import Darwin
 import ExplorerCore
+import ImageIO
 import SwiftUI
+import UniformTypeIdentifiers
 
 @MainActor
 final class PropertiesWindowController: NSWindowController, NSWindowDelegate {
@@ -28,7 +31,7 @@ final class PropertiesWindowController: NSWindowController, NSWindowDelegate {
         let properties = PropertiesModel(url: url)
         self.properties = properties
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 580, height: 650),
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 720),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -53,6 +56,12 @@ final class PropertiesWindowController: NSWindowController, NSWindowDelegate {
     }
 }
 
+private struct MetadataRow: Identifiable {
+    let id = UUID()
+    let title: String
+    let value: String
+}
+
 @MainActor
 private final class PropertiesModel: ObservableObject {
     let url: URL
@@ -62,14 +71,154 @@ private final class PropertiesModel: ObservableObject {
     @Published var kind = "Folder"
     @Published var access = "—"
     @Published var volume: VolumeMetadata?
+    @Published var permissions = "—"
+    @Published var owner = "—"
+    @Published var group = "—"
+    @Published var hardLinkCount = 0
+    @Published var typeIdentifier = "—"
+    @Published var symlinkTarget: String?
+    @Published var extendedAttributes: [String] = []
+    @Published var acl: [String] = []
+    @Published var imageMetadata: [MetadataRow] = []
+    @Published var isQuarantined = false
+    @Published var checksum: String?
+    @Published var checksumState = ChecksumState.idle
     private var scan: Task<Void, Never>?
+    private var checksumTask: Task<Void, Never>?
+
+    enum ChecksumState {
+        case idle
+        case calculating
+        case failed
+    }
 
     init(url: URL) { self.url = url }
 
+    private func loadMetadata() {
+        let manager = FileManager.default
+        let attributes = try? manager.attributesOfItem(atPath: url.path)
+        if let mode = attributes?[.posixPermissions] as? NSNumber {
+            permissions = String(format: "%03o", mode.intValue)
+        }
+        owner = attributes?[.ownerAccountName] as? String ?? "—"
+        group = attributes?[.groupOwnerAccountName] as? String ?? "—"
+        hardLinkCount = Int(attributes?[.referenceCount] as? UInt ?? 0)
+
+        var info = stat()
+        if stat(url.path, &info) == 0 {
+            hardLinkCount = Int(info.st_nlink)
+        }
+
+        let resourceValues = try? url.resourceValues(forKeys: [.typeIdentifierKey, .isSymbolicLinkKey])
+        if let identifier = resourceValues?.typeIdentifier {
+            typeIdentifier = UTType(identifier)?.localizedDescription ?? identifier
+        }
+        if resourceValues?.isSymbolicLink == true {
+            symlinkTarget = try? manager.destinationOfSymbolicLink(atPath: url.path)
+        }
+
+        extendedAttributes = extendedAttributeNames()
+        isQuarantined = extendedAttributes.contains("com.apple.quarantine")
+        acl = accessControlEntries()
+        imageMetadata = imageProperties()
+    }
+
+    private func extendedAttributeNames() -> [String] {
+        let size = listxattr(url.path, nil, 0, 0)
+        guard size > 0 else { return [] }
+        var buffer = [CChar](repeating: 0, count: size)
+        let result = listxattr(url.path, &buffer, size, 0)
+        guard result > 0 else { return [] }
+        let data = Data(bytes: buffer, count: result)
+        return String(decoding: data, as: UTF8.self)
+            .split(separator: "\0")
+            .map(String.init)
+            .filter { !$0.isEmpty }
+    }
+
+    private func accessControlEntries() -> [String] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/ls")
+        process.arguments = ["-led", url.path]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch { return [] }
+        guard let text = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) else {
+            return []
+        }
+        return text.split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .filter { line in
+                guard let range = line.range(of: #"^\s*\d+:\s"#, options: .regularExpression) else { return false }
+                return range.lowerBound == line.startIndex
+            }
+    }
+
+    private func imageProperties() -> [MetadataRow] {
+        guard let type = try? url.resourceValues(forKeys: [.typeIdentifierKey]).typeIdentifier,
+              UTType(type)?.conforms(to: .image) == true,
+              let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any] else {
+            return []
+        }
+        var rows: [MetadataRow] = []
+        if let width = (properties[kCGImagePropertyPixelWidth as String] as? NSNumber)?.intValue,
+           let height = (properties[kCGImagePropertyPixelHeight as String] as? NSNumber)?.intValue {
+            rows.append(MetadataRow(title: "Dimensions", value: "\(width) × \(height) px"))
+        }
+        if let dpi = (properties[kCGImagePropertyDPIWidth as String] as? NSNumber)?.intValue {
+            rows.append(MetadataRow(title: "Resolution", value: "\(dpi) DPI"))
+        }
+        if let profile = properties[kCGImagePropertyProfileName as String] as? String {
+            rows.append(MetadataRow(title: "Color profile", value: profile))
+        }
+        if let tiff = properties[kCGImagePropertyTIFFDictionary as String] as? [String: Any] {
+            if let make = tiff[kCGImagePropertyTIFFMake as String] as? String {
+                rows.append(MetadataRow(title: "Camera make", value: make))
+            }
+            if let model = tiff[kCGImagePropertyTIFFModel as String] as? String {
+                rows.append(MetadataRow(title: "Camera model", value: model))
+            }
+        }
+        if let exif = properties[kCGImagePropertyExifDictionary as String] as? [String: Any],
+           let date = exif[kCGImagePropertyExifDateTimeOriginal as String] as? String {
+            rows.append(MetadataRow(title: "Captured", value: date))
+        }
+        return rows
+    }
+
+    func calculateChecksum() {
+        guard !isDirectory else { return }
+        checksumTask?.cancel()
+        checksumState = .calculating
+        checksum = nil
+        let url = url
+        checksumTask = Task { [weak self] in
+            let value = await Task.detached(priority: .utility) {
+                FileHasher.sha256(at: url)
+            }.value
+            guard !Task.isCancelled else { return }
+            self?.checksum = value
+            self?.checksumState = value == nil ? .failed : .idle
+        }
+    }
+
+    var isDirectory: Bool {
+        (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+    }
+
     func refresh() {
         scan?.cancel()
+        checksumTask?.cancel()
         statistics = FolderStatistics()
         volume = nil
+        checksum = nil
+        checksumState = .idle
+        loadMetadata()
 
         let values = try? url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey,
                                                       .isDirectoryKey, .isSymbolicLinkKey])
@@ -110,6 +259,7 @@ private final class PropertiesModel: ObservableObject {
 
     func cancel() {
         scan?.cancel()
+        checksumTask?.cancel()
         if !statistics.isComplete { statistics.isCancelled = true }
     }
 }
@@ -123,21 +273,27 @@ private struct PropertiesView: View {
     private var partial: Bool { model.volume == nil && (totals.inaccessibleCount > 0 || totals.isCancelled) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 14) {
             header
             Divider()
 
-            if let volume = model.volume {
-                volumeBody(volume)
-            } else {
-                folderBody
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    if let volume = model.volume {
+                        volumeBody(volume)
+                    } else {
+                        folderBody
+                        metadataSection
+                    }
+                }
+                .padding(.trailing, 4)
             }
 
-            Spacer(minLength: 0)
+            Divider()
             footer
         }
         .padding(24)
-        .frame(width: 580, height: 650)
+        .frame(width: 620, height: 720)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
@@ -200,6 +356,109 @@ private struct PropertiesView: View {
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Text("Size on disk reports allocated file blocks, counts hard links once, and excludes folder metadata. Shared APFS blocks may appear in more than one folder.")
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var metadataSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Divider()
+            Text("METADATA")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 9) {
+                detail("Permissions", model.permissions)
+                detail("Owner", model.owner)
+                detail("Group", model.group)
+                detail("Hard links", "\(model.hardLinkCount)")
+                detail("Type", model.typeIdentifier)
+                detail("Quarantine", model.isQuarantined ? "Yes" : "No")
+                if let target = model.symlinkTarget {
+                    detail("Symlink target", target)
+                }
+            }
+
+            if !model.extendedAttributes.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Extended attributes")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Text(model.extendedAttributes.joined(separator: "\n"))
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .textSelection(.enabled)
+                        .lineLimit(8)
+                }
+            }
+
+            if !model.acl.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Access control")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Text(model.acl.joined(separator: "\n"))
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+            }
+
+            if !model.imageMetadata.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Image")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 5) {
+                        ForEach(model.imageMetadata) { row in
+                            GridRow(alignment: .top) {
+                                Text(row.title).foregroundStyle(.secondary)
+                                Text(row.value).textSelection(.enabled)
+                            }
+                            .font(.system(size: 11))
+                        }
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                Text("SHA-256")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if model.isDirectory {
+                    Text("Available for files")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                } else if model.checksumState == .calculating {
+                    ProgressView().controlSize(.small)
+                    Text("Calculating…").font(.system(size: 10.5)).foregroundStyle(.secondary)
+                } else {
+                    Button(model.checksum == nil ? "Calculate" : "Recalculate") {
+                        model.calculateChecksum()
+                    }
+                    .controlSize(.small)
+                }
+            }
+
+            if let checksum = model.checksum {
+                HStack(alignment: .top, spacing: 8) {
+                    Text(checksum)
+                        .font(.system(size: 10, design: .monospaced))
+                        .textSelection(.enabled)
+                        .lineLimit(2)
+                    Spacer()
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(checksum, forType: .string)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Copy SHA-256")
+                }
+            } else if model.checksumState == .failed {
+                Text("Couldn’t calculate a checksum for this item.")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.orange)
             }
         }
     }
