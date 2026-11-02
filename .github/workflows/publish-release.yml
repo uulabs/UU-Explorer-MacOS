@@ -1,0 +1,41 @@
+name: Publish release
+
+on:
+  push:
+    tags:
+      - 'v*-publish'
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch signed release assets
+        run: |
+          git fetch origin release-assets
+          mkdir -p .release-assets
+          git archive origin/release-assets | tar -x -C .release-assets
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          REF="${GITHUB_REF_NAME}"
+          TAG="${REF%-publish}"
+          VERSION="${TAG#v}"
+          NOTES=".release-assets/RELEASE_NOTES.md"
+          DMG=".release-assets/UU-Explorer-${VERSION}.dmg"
+          ZIP=".release-assets/UU-Explorer-${VERSION}.zip"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$DMG" "$DMG.sha256" "$ZIP" "$ZIP.sha256" --clobber
+          else
+            gh release create "$TAG" \
+              "$DMG" "$DMG.sha256" "$ZIP" "$ZIP.sha256" \
+              --title "UU Explorer ${VERSION}" \
+              --notes-file "$NOTES" \
+              --latest
+          fi
