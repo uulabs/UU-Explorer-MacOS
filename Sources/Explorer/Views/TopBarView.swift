@@ -345,7 +345,14 @@ struct MoreMenu: View {
             Button("Show in Finder") { model.revealSelectionInFinder() }
                 .disabled(model.selection.isEmpty)
             Button("Open in Terminal") { model.openCurrentFolderInTerminal() }
-            Button("Add Network Location…") { model.addNetworkLocation() }
+            Button("Add Network Share…") { model.addNetworkLocation() }
+            Button(LoginItemController.isEnabled ? "Disable Launch at Login" : "Launch at Login") {
+                do {
+                    try LoginItemController.setEnabled(!LoginItemController.isEnabled)
+                } catch {
+                    model.showStatus("Couldn’t update Launch at Login: \(error.localizedDescription)", kind: .error)
+                }
+            }
             if model.selection.count == 1 {
                 Button("Compress with Password…") { model.beginEncryptedCompression() }
                 if let item = model.selectedItems.first, ArchiveService.isArchive(item.url) {

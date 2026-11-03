@@ -19,9 +19,7 @@ struct SidebarView: View {
             if !model.savedSearches.isEmpty {
                 Rectangle().fill(theme.sidebarDivider).frame(height: 1)
             }
-            if !model.networkLocations.isEmpty {
-                Rectangle().fill(theme.sidebarDivider).frame(height: 1)
-            }
+            Rectangle().fill(theme.sidebarDivider).frame(height: 1)
             networkSection
             quickAccessSection
             Rectangle().fill(theme.sidebarDivider).frame(height: 1)
@@ -30,31 +28,47 @@ struct SidebarView: View {
         .background(theme.sidebar)
     }
 
-    @ViewBuilder
     private var networkSection: some View {
-        if !model.networkLocations.isEmpty {
-            VStack(alignment: .leading, spacing: 1) {
-                HStack {
-                    Text("NETWORK")
-                        .font(.system(size: 9.5, weight: .semibold))
-                        .tracking(0.7)
-                        .foregroundStyle(theme.sidebarSecondary)
-                    Spacer()
-                    Button {
-                        model.addNetworkLocation()
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 9, weight: .semibold))
-                            .frame(width: 14, height: 14)
-                    }
-                    .buttonStyle(.plain)
+        VStack(alignment: .leading, spacing: 1) {
+            HStack {
+                Text("NETWORK")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .tracking(0.7)
                     .foregroundStyle(theme.sidebarSecondary)
-                    .help("Add Network Location…")
+                Spacer()
+                Button {
+                    model.addNetworkLocation()
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: 14, height: 14)
                 }
-                .padding(.horizontal, 11)
-                .padding(.top, 9)
-                .padding(.bottom, 2)
+                .buttonStyle(.plain)
+                .foregroundStyle(theme.sidebarSecondary)
+                .help("Add Network Share…")
+            }
+            .padding(.horizontal, 11)
+            .padding(.top, 9)
+            .padding(.bottom, 2)
 
+            if model.networkLocations.isEmpty {
+                Button {
+                    model.addNetworkLocation()
+                } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: "plus.circle")
+                            .font(.system(size: 11))
+                        Text("Add Network Share…")
+                            .font(.system(size: 11.5))
+                        Spacer()
+                    }
+                    .foregroundStyle(theme.sidebarSecondary)
+                    .padding(.horizontal, 12)
+                    .frame(height: 25)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            } else {
                 ForEach(model.networkLocations) { location in
                     SidebarQuickRow(
                         item: QuickAccessItem(
@@ -69,6 +83,9 @@ struct SidebarView: View {
                     }
                     .contextMenu {
                         Button("Reconnect") { model.connectNetworkLocation(location) }
+                        Button(location.autoConnect ? "Don’t Connect at Launch" : "Connect at Launch") {
+                            model.toggleNetworkAutoConnect(location)
+                        }
                         Button("Copy Address") {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(location.urlString, forType: .string)
@@ -77,10 +94,10 @@ struct SidebarView: View {
                     }
                 }
             }
-            .padding(.bottom, 5)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .fixedSize(horizontal: false, vertical: true)
         }
+        .padding(.bottom, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     @ViewBuilder

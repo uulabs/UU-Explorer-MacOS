@@ -70,7 +70,7 @@ UU Explorer is a real AppKit/SwiftUI application, not a Finder skin. It brings t
 - **`uu` CLI and `uu-explorer://` URL scheme** for opening folders and files from scripts, Shortcuts, or another app.
 - **Open With**, **Quick Actions**, and the system **Share** picker.
 - **Compress**, **Extract Here/To…**, **RAR/7-Zip extraction**, and password-protected ZIP creation.
-- **Saved SMB/AFP/NFS locations** that reconnect through macOS while keeping credentials in the system keychain.
+- **Saved SMB/AFP/NFS shares** with a three-step setup wizard, optional reconnect at launch, and optional Launch at Login for persistence across restarts. Credentials stay in the macOS keychain.
 - **Command palette** for file, view, search, sizing, and settings actions.
 - **Ten theme presets**, independent light/dark palettes, and eight folder icon styles.
 
@@ -107,6 +107,10 @@ UU Explorer is a real AppKit/SwiftUI application, not a Finder skin. It brings t
 ### Folder compare
 
 <a href="Screenshots/folder-compare.png"><img src="Screenshots/folder-compare.png" alt="Folder comparison with left and right panes"></a>
+
+### Network share wizard
+
+<a href="Screenshots/network-wizard.png"><img src="Screenshots/network-wizard.png" alt="Network share setup wizard"></a>
 
 ## Install
 
@@ -235,7 +239,7 @@ scripts/                     Portable app, DMG, release, test, and icon scripts
 swift test
 ```
 
-The repository includes 66 `ExplorerCore` tests covering path handling, sorting, archive round-trips, archive entry selection, search filters, folder comparison, batch rename planning, folder sizes, volume metadata, network address parsing, transfer byte accounting and verification, file hashing, and update release/checksum selection.
+The repository includes 67 `ExplorerCore` tests covering path handling, sorting, archive round-trips, archive entry selection, search filters, folder comparison, batch rename planning, folder sizes, volume metadata, network address parsing, transfer byte accounting and verification, file hashing, and update release/checksum selection.
 
 ## Security and privacy
 

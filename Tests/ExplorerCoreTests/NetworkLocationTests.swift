@@ -19,6 +19,19 @@ final class NetworkLocationTests: XCTestCase {
         XCTAssertEqual(nfs.url?.path, "/export")
     }
 
+    func testAutoConnectDefaultsForOlderSavedLocations() throws {
+        let json = #"{"id":"00000000-0000-0000-0000-000000000001","name":"Media","urlString":"smb://nas/Media","protocolName":"smb"}"#
+        let location = try JSONDecoder().decode(NetworkLocation.self, from: Data(json.utf8))
+        XCTAssertFalse(location.autoConnect)
+
+        let explicit = try NetworkLocation.parse(
+            address: "smb://nas/Media",
+            name: "Media",
+            autoConnect: true
+        )
+        XCTAssertTrue(explicit.autoConnect)
+    }
+
     func testRejectsUnsupportedOrEmptyInput() {
         XCTAssertThrowsError(try NetworkLocation.parse(address: "https://example.com"))
         XCTAssertThrowsError(try NetworkLocation.parse(address: ""))

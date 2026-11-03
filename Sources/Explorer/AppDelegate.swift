@@ -162,6 +162,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if options.snapshotPath == nil {
             Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                self?.model?.autoConnectNetworkLocations()
+            }
+            Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 await self?.updateService?.checkAutomatically()
                 self?.scheduleUpdateCheckTimer()

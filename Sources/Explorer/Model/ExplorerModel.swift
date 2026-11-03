@@ -263,6 +263,7 @@ final class ExplorerModel: ObservableObject {
     @Published private(set) var searchScanned = 0
     @Published private(set) var savedSearches: [SavedSearch]
     @Published private(set) var networkLocations: [NetworkLocation]
+    @Published var isAddingNetworkLocation = false
     @Published private(set) var customActions: [CustomAction]
     @Published var isManagingCustomActions = false
     @Published private(set) var verifyTransfers: Bool
@@ -1423,7 +1424,22 @@ final class ExplorerModel: ObservableObject {
     func revealSelectionInFinder() {
         let urls = selectedItems.map(\.url)
         guard !urls.isEmpty else { return }
-        NSWorkspace.shared.activateFileViewerSelecting(urls)
+        guard let finder = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.finder") else {
+            showStatus("Finder couldn’t be found.", kind: .error)
+            return
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.open(
+            urls,
+            withApplicationAt: finder,
+            configuration: configuration
+        ) { [weak self] _, error in
+            guard let error else { return }
+            Task { @MainActor in
+                self?.showStatus("Couldn’t reveal in Finder: \(error.localizedDescription)", kind: .error)
+            }
+        }
     }
 
     func openInTerminal(_ directory: URL) {
@@ -1950,36 +1966,17 @@ final class ExplorerModel: ObservableObject {
     // MARK: Network locations
 
     func addNetworkLocation() {
-        let alert = NSAlert()
-        alert.messageText = "Add Network Location"
-        alert.informativeText = "Enter an SMB, AFP, or NFS address. Credentials are handled by macOS."
-        alert.addButton(withTitle: "Add")
-        alert.addButton(withTitle: "Cancel")
-
-        let addressField = NSTextField(string: "smb://")
-        addressField.placeholderString = "smb://server/share"
-        addressField.widthAnchor.constraint(greaterThanOrEqualToConstant: 300).isActive = true
-        let nameField = NSTextField(string: "")
-        nameField.placeholderString = "Optional display name"
-        nameField.widthAnchor.constraint(greaterThanOrEqualToConstant: 300).isActive = true
-
-        let grid = NSGridView(views: [
-            [NSTextField(labelWithString: "Address:"), addressField],
-            [NSTextField(labelWithString: "Name:"), nameField]
-        ])
-        grid.column(at: 0).xPlacement = .trailing
-        grid.rowSpacing = 8
-        grid.columnSpacing = 8
-        alert.accessoryView = grid
-
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        _ = saveNetworkLocation(address: addressField.stringValue, name: nameField.stringValue)
+        isAddingNetworkLocation = true
     }
 
     @discardableResult
-    func saveNetworkLocation(address: String, name: String = "") -> Bool {
+    func saveNetworkLocation(address: String, name: String = "", autoConnect: Bool = true) -> Bool {
         do {
-            let location = try NetworkLocation.parse(address: address, name: name)
+            let location = try NetworkLocation.parse(
+                address: address,
+                name: name,
+                autoConnect: autoConnect
+            )
             if networkLocations.contains(where: {
                 $0.urlString.caseInsensitiveCompare(location.urlString) == .orderedSame
             }) {
@@ -1996,13 +1993,95 @@ final class ExplorerModel: ObservableObject {
         }
     }
 
+    @discardableResult
+    func addNetworkLocation(
+        address: String,
+        name: String,
+        autoConnect: Bool
+    ) -> NetworkLocation? {
+        guard saveNetworkLocation(address: address, name: name, autoConnect: autoConnect) else {
+            return nil
+        }
+        let normalized = (try? NetworkLocation.parse(address: address, name: name))?.urlString
+        return networkLocations.first(where: { $0.urlString == normalized })
+    }
+
     func connectNetworkLocation(_ location: NetworkLocation) {
+        if let mounted = mountedNetworkURL(for: location) {
+            openDirectory(mounted, pushHistory: true, selecting: nil)
+            return
+        }
         guard let url = location.url else {
             showStatus("The network address is invalid.", kind: .error)
             return
         }
-        NSWorkspace.shared.open(url)
-        showStatus("Connecting to \(location.name)…")
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        NSWorkspace.shared.open(url, configuration: configuration) { _, error in
+            if let error {
+                Task { @MainActor in
+                    self.showStatus("Couldn’t mount \(location.name): \(error.localizedDescription)", kind: .error)
+                }
+            }
+        }
+        showStatus("Mounting \(location.name)…")
+
+        // The system owns authentication/mounting. Once it has finished, keep
+        // the result inside UU Explorer instead of requiring another click.
+        Task { [weak self] in
+            for _ in 0..<20 {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard let self else { return }
+                if let mounted = self.mountedNetworkURL(for: location) {
+                    self.openDirectory(mounted, pushHistory: true, selecting: nil)
+                    NSApp.activate(ignoringOtherApps: true)
+                    return
+                }
+            }
+        }
+    }
+
+    private func mountedNetworkURL(for location: NetworkLocation) -> URL? {
+        guard let url = location.url else { return nil }
+        let share = url.pathComponents.last?.lowercased() ?? ""
+        guard !share.isEmpty, share != "/" else { return nil }
+        let volumes = FileManager.default.mountedVolumeURLs(
+            includingResourceValuesForKeys: [.volumeNameKey],
+            options: [.skipHiddenVolumes]
+        ) ?? []
+        return volumes.first { volume in
+            let mountName = volume.lastPathComponent.lowercased()
+            let volumeName = (try? volume.resourceValues(forKeys: [.volumeNameKey]).volumeName)?.lowercased() ?? ""
+            return mountName == share || volumeName == share
+        }
+    }
+
+    func toggleNetworkAutoConnect(_ location: NetworkLocation) {
+        guard let index = networkLocations.firstIndex(where: { $0.id == location.id }) else { return }
+        networkLocations[index].autoConnect.toggle()
+        persistNetworkLocations()
+        showStatus(
+            networkLocations[index].autoConnect
+                ? "Will reconnect “\(location.name)” at launch"
+                : "Won’t reconnect “\(location.name)” automatically"
+        )
+    }
+
+    func autoConnectNetworkLocations() {
+        let mountedNames = Set(
+            (FileManager.default.mountedVolumeURLs(
+                includingResourceValuesForKeys: [.volumeNameKey],
+                options: [.skipHiddenVolumes]
+            ) ?? []).map { $0.lastPathComponent.lowercased() }
+        )
+        for location in networkLocations where location.autoConnect {
+            guard let url = location.url else { continue }
+            let shareName = url.lastPathComponent.lowercased()
+            if !shareName.isEmpty, mountedNames.contains(shareName) { continue }
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = false
+            NSWorkspace.shared.open(url, configuration: configuration)
+        }
     }
 
     func removeNetworkLocation(_ location: NetworkLocation) {

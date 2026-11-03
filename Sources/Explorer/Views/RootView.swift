@@ -68,6 +68,9 @@ struct RootView: View {
         .sheet(isPresented: $model.isManagingCustomActions) {
             CustomActionManagerView(model: model)
         }
+        .sheet(isPresented: $model.isAddingNetworkLocation) {
+            NetworkShareWizardView(model: model)
+        }
         .sheet(isPresented: $model.isShowingStorageUsage) {
             StorageUsageView(model: model)
         }
