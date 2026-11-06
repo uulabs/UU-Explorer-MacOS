@@ -923,6 +923,9 @@ struct FileTableView: NSViewRepresentable {
                         action: #selector(menuCalculateFolderSize(_:))
                     ))
                 }
+                if selectedCount == 1, items[row].url.pathExtension.lowercased() == "apk" {
+                    menu.addItem(apkInstallMenuItem(for: items[row].url))
+                }
                 menu.addItem(.separator())
                 menu.addItem(menuItem("Properties…", action: #selector(menuProperties(_:)), enabled: selectedCount == 1))
                 menu.addItem(.separator())
@@ -963,6 +966,95 @@ struct FileTableView: NSViewRepresentable {
         @objc private func menuCurrentFolderProperties(_ sender: Any?) {
             PropertiesWindowController.show(for: model.currentURL)
         }
+        private func apkInstallMenuItem(for apk: URL) -> NSMenuItem {
+            let install = NSMenu()
+            let adb = ADBService.shared
+            let devices = adb.refreshDevicesSync()
+
+            if adb.adbPath == nil {
+                let missing = NSMenuItem(title: "ADB Not Found", action: nil, keyEquivalent: "")
+                missing.isEnabled = false
+                install.addItem(missing)
+                install.addItem(.separator())
+                let locate = NSMenuItem(
+                    title: "Locate ADB…",
+                    action: #selector(menuLocateADB(_:)),
+                    keyEquivalent: ""
+                )
+                locate.target = self
+                install.addItem(locate)
+            } else if devices.isEmpty {
+                let empty = NSMenuItem(title: "No Android Devices", action: nil, keyEquivalent: "")
+                empty.isEnabled = false
+                install.addItem(empty)
+                install.addItem(.separator())
+                let refresh = NSMenuItem(
+                    title: "Refresh Devices",
+                    action: #selector(menuRefreshADB(_:)),
+                    keyEquivalent: ""
+                )
+                refresh.target = self
+                install.addItem(refresh)
+            } else {
+                for device in devices {
+                    let item = NSMenuItem(
+                        title: device.isReady ? device.displayName : "\(device.displayName) — \(device.state)",
+                        action: #selector(menuInstallAPK(_:)),
+                        keyEquivalent: ""
+                    )
+                    item.target = self
+                    item.representedObject = APKInstallTarget(apk: apk, serial: device.serial)
+                    item.isEnabled = device.isReady
+                    install.addItem(item)
+                }
+                install.addItem(.separator())
+                let refresh = NSMenuItem(
+                    title: "Refresh Devices",
+                    action: #selector(menuRefreshADB(_:)),
+                    keyEquivalent: ""
+                )
+                refresh.target = self
+                install.addItem(refresh)
+            }
+
+            let parent = NSMenuItem(title: "Install APK on Device", action: nil, keyEquivalent: "")
+            parent.submenu = install
+            return parent
+        }
+
+        @objc private func menuInstallAPK(_ sender: Any?) {
+            guard let target = (sender as? NSMenuItem)?.representedObject as? APKInstallTarget,
+                  let device = ADBService.shared.devices.first(where: { $0.serial == target.serial }) else {
+                model.showStatus("That Android device is no longer connected.", kind: .error)
+                return
+            }
+            model.showStatus("Installing \(target.apk.lastPathComponent) on \(device.displayName)…")
+            ADBService.shared.installAPK(target.apk, on: device) { [weak self] result in
+                Task { @MainActor in
+                    guard let self else { return }
+                    switch result {
+                    case .success:
+                        self.model.showStatus("Installed \(target.apk.lastPathComponent) on \(device.displayName)")
+                    case .failure(let error):
+                        self.model.showStatus("Install failed: \(error.localizedDescription)", kind: .error)
+                    }
+                }
+            }
+        }
+
+        @objc private func menuRefreshADB(_ sender: Any?) {
+            let devices = ADBService.shared.refreshDevicesSync()
+            model.showStatus(
+                devices.isEmpty
+                    ? "No Android devices found"
+                    : "\(devices.count) Android device\(devices.count == 1 ? "" : "s") connected"
+            )
+        }
+
+        @objc private func menuLocateADB(_ sender: Any?) {
+            ADBService.shared.chooseADBPath()
+        }
+
         @objc private func menuOpen(_ sender: Any?) { model.openSelectedItems() }
         @objc private func menuOpenInNewTab(_ sender: Any?) {
             guard let url = (sender as? NSMenuItem)?.representedObject as? URL else { return }
@@ -1021,5 +1113,16 @@ struct FileTableView: NSViewRepresentable {
         @objc private func menuCalculateVisibleFolderSizes(_ sender: Any?) { model.calculateVisibleFolderSizes() }
         @objc private func menuEncryptedCompress(_ sender: Any?) { model.beginEncryptedCompression() }
         @objc private func menuBrowseArchive(_ sender: Any?) { model.beginArchiveBrowsing() }
+    }
+}
+
+
+private final class APKInstallTarget: NSObject {
+    let apk: URL
+    let serial: String
+
+    init(apk: URL, serial: String) {
+        self.apk = apk
+        self.serial = serial
     }
 }

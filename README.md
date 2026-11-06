@@ -60,6 +60,9 @@ UU Explorer is a real AppKit/SwiftUI application, not a Finder skin. It brings t
 
 - **Byte-level operation queue** with speed, ETA, pause/resume, cancel, and Replace / Keep Both / Skip / Apply to All conflict handling.
 - **Transfer verification** via SHA-256 tree comparison, enabled from the More menu or command palette.
+- **Android devices over ADB**: browse `/sdcard`, open files, pull, and push.
+- **Install APK on connected device** from the file context menu, with a device submenu.
+- **Eject** external volumes and mounted disk images from the sidebar.
 - **Dual-pane F5/F6** copy and move between panes.
 - **Folder comparison sheet** for left-only, right-only, changed, and identical entries, with copy-left/right actions.
 - **Metadata inspector** for POSIX permissions, owner/group, hard links, xattrs, ACLs, symlinks, quarantine, image metadata, and streamed SHA-256.
@@ -111,6 +114,10 @@ UU Explorer is a real AppKit/SwiftUI application, not a Finder skin. It brings t
 ### Network share wizard
 
 <a href="Screenshots/network-wizard.png"><img src="Screenshots/network-wizard.png" alt="Network share setup wizard"></a>
+
+### Android devices
+
+<a href="Screenshots/android-browser.png"><img src="Screenshots/android-browser.png" alt="Android device browser over ADB"></a>
 
 ## Install
 

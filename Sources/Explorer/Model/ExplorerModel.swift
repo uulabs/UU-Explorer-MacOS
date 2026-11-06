@@ -264,6 +264,8 @@ final class ExplorerModel: ObservableObject {
     @Published private(set) var savedSearches: [SavedSearch]
     @Published private(set) var networkLocations: [NetworkLocation]
     @Published var isAddingNetworkLocation = false
+    @Published var isShowingAndroidBrowser = false
+    @Published var androidBrowserSerial: String?
     @Published private(set) var customActions: [CustomAction]
     @Published var isManagingCustomActions = false
     @Published private(set) var verifyTransfers: Bool
@@ -809,6 +811,45 @@ final class ExplorerModel: ObservableObject {
             for path in expandedPaths {
                 await loadTreeChildren(path: path, force: true)
             }
+        }
+    }
+
+    func ejectVolume(_ volumeURL: URL) {
+        let target = volumeURL.standardizedFileURL
+        guard target.path != "/" else {
+            showStatus("The startup disk can’t be ejected.", kind: .error)
+            return
+        }
+        Task { [weak self] in
+            do {
+                try NSWorkspace.shared.unmountAndEjectDevice(at: target)
+                guard let self else { return }
+                let wasInsideVolume = PathTools.isDescendant(self.currentURL, of: target)
+                    || self.currentURL.path == target.path
+                self.refreshVolumeRoots()
+                if wasInsideVolume {
+                    self.goHome()
+                }
+                self.showStatus("Ejected “\(target.lastPathComponent)”")
+            } catch {
+                self?.showStatus("Couldn’t eject “\(target.lastPathComponent)”: \(error.localizedDescription)", kind: .error)
+            }
+        }
+    }
+
+    private func refreshVolumeRoots() {
+        treeRoots = FileSystemService.mountedVolumes().map {
+            TreeRoot(url: $0.url, name: $0.name, isInternal: $0.isInternal)
+        }
+        if treeRoots.isEmpty {
+            treeRoots = [TreeRoot(url: URL(fileURLWithPath: "/"), name: "Macintosh HD", isInternal: true)]
+        }
+        let valid = Set(treeRoots.map(\.url.path))
+        expandedPaths = expandedPaths.filter { path in
+            path == "/" || valid.contains(where: { path == $0 || path.hasPrefix($0 + "/") })
+        }
+        treeChildren = treeChildren.filter { path, _ in
+            path == "/" || valid.contains(where: { path == $0 || path.hasPrefix($0 + "/") })
         }
     }
 
@@ -1969,6 +2010,11 @@ final class ExplorerModel: ObservableObject {
         isAddingNetworkLocation = true
     }
 
+    func showAndroidBrowser(serial: String? = nil) {
+        androidBrowserSerial = serial
+        isShowingAndroidBrowser = true
+    }
+
     @discardableResult
     func saveNetworkLocation(address: String, name: String = "", autoConnect: Bool = true) -> Bool {
         do {
@@ -2033,6 +2079,7 @@ final class ExplorerModel: ObservableObject {
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 guard let self else { return }
                 if let mounted = self.mountedNetworkURL(for: location) {
+                    self.refreshVolumeRoots()
                     self.openDirectory(mounted, pushHistory: true, selecting: nil)
                     NSApp.activate(ignoringOtherApps: true)
                     return

@@ -4,6 +4,7 @@ import SwiftUI
 
 struct SidebarView: View {
     @ObservedObject var model: ExplorerModel
+    @ObservedObject private var adb = ADBService.shared
     @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.colorScheme) private var colorScheme
 
@@ -21,11 +22,18 @@ struct SidebarView: View {
             }
             Rectangle().fill(theme.sidebarDivider).frame(height: 1)
             networkSection
+            if !adb.devices.isEmpty {
+                Rectangle().fill(theme.sidebarDivider).frame(height: 1)
+                androidSection
+            }
             quickAccessSection
             Rectangle().fill(theme.sidebarDivider).frame(height: 1)
             treeSection
         }
         .background(theme.sidebar)
+        .task {
+            _ = await adb.refreshDevices()
+        }
     }
 
     private var networkSection: some View {
@@ -93,6 +101,49 @@ struct SidebarView: View {
                         Button("Remove Network Location") { model.removeNetworkLocation(location) }
                     }
                 }
+            }
+        }
+        .padding(.bottom, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var androidSection: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack {
+                Text("ANDROID")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .tracking(0.7)
+                    .foregroundStyle(theme.sidebarSecondary)
+                Spacer()
+                Button {
+                    Task { await adb.refreshDevices() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: 14, height: 14)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(theme.sidebarSecondary)
+                .help("Refresh Android devices")
+            }
+            .padding(.horizontal, 11)
+            .padding(.top, 9)
+            .padding(.bottom, 2)
+
+            ForEach(adb.devices) { device in
+                SidebarQuickRow(
+                    item: QuickAccessItem(
+                        title: device.isReady ? device.model.replacingOccurrences(of: "_", with: " ") : "\(device.model.replacingOccurrences(of: "_", with: " ")) (\(device.state))",
+                        url: URL(fileURLWithPath: "/"),
+                        symbol: "candybarphone",
+                        color: device.isReady ? .green : .orange
+                    ),
+                    isSelected: false
+                ) {
+                    model.showAndroidBrowser(serial: device.serial)
+                }
+                .help(device.displayName)
             }
         }
         .padding(.bottom, 5)
@@ -239,6 +290,10 @@ struct SidebarView: View {
                                 return true
                             }
                             .contextMenu {
+                                if row.isVolume, !row.isInternal {
+                                    Button("Eject") { model.ejectVolume(row.url) }
+                                    Divider()
+                                }
                                 Button("Open in New Tab") { model.openInNewTab(row.url) }
                                 Button("Open in Terminal") { model.openInTerminal(row.url) }
                                 Button(model.isFavorite(row.url) ? "Remove from Favourites" : "Pin to Favourites") {

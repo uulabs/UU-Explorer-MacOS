@@ -346,6 +346,7 @@ struct MoreMenu: View {
                 .disabled(model.selection.isEmpty)
             Button("Open in Terminal") { model.openCurrentFolderInTerminal() }
             Button("Add Network Share…") { model.addNetworkLocation() }
+            Button("Android Devices…") { model.showAndroidBrowser() }
             Button(LoginItemController.isEnabled ? "Disable Launch at Login" : "Launch at Login") {
                 do {
                     try LoginItemController.setEnabled(!LoginItemController.isEnabled)

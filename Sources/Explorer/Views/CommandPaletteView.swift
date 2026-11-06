@@ -75,6 +75,9 @@ struct CommandPaletteView: View {
             command("reveal", "Show in Finder", "Reveal the selection in Finder", "folder", enabled: hasSelection) {
                 model.revealSelectionInFinder()
             },
+            command("android-devices", "Android Devices…", "Browse an adb-connected Android device", "candybarphone") {
+                model.showAndroidBrowser()
+            },
             command("browse-archive", "Browse Archive…", "Inspect and selectively extract archive contents", "archivebox", enabled: model.selectedItems.count == 1 && model.selectedItems.first.map { ArchiveService.isArchive($0.url) } == true) {
                 model.beginArchiveBrowsing()
             },

@@ -160,7 +160,7 @@ public enum ArchiveService {
             while name.hasSuffix("/") { name.removeLast() }
             guard !name.isEmpty else { continue }
 
-            var components = name.split(separator: "/").map(String.init)
+            let components = name.split(separator: "/").map(String.init)
             if components.count > 1 {
                 for index in 1..<components.count {
                     append(components.prefix(index).joined(separator: "/"), isDirectory: true)
