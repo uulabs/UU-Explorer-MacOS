@@ -1457,6 +1457,83 @@ final class ExplorerModel: ObservableObject {
         }
     }
 
+    func forceDeleteSelection() {
+        let itemsToDelete = selectedItems
+        guard !itemsToDelete.isEmpty else { return }
+        let count = itemsToDelete.count
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = count == 1
+            ? "Delete “\(itemsToDelete[0].name)” permanently?"
+            : "Delete \(count) items permanently?"
+        alert.informativeText = "This removes the selected items immediately and cannot be undone."
+        alert.addButton(withTitle: "Delete Permanently")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let urls = itemsToDelete.map(\.url)
+        Task { [weak self] in
+            let failures: [String] = await Task.detached(priority: .userInitiated) {
+                var failures: [String] = []
+                for url in urls {
+                    do {
+                        try TrashService.permanentDelete(url)
+                    } catch {
+                        failures.append("\(url.lastPathComponent): \(error.localizedDescription)")
+                    }
+                }
+                return failures
+            }.value
+
+            guard let self else { return }
+            for item in itemsToDelete where !failures.contains(where: { $0.hasPrefix(item.url.lastPathComponent + ":") }) {
+                self.forgetTreeSubtree(item.url.path)
+            }
+            self.selection = []
+            self.invalidateTree(self.currentURL)
+            self.reload(preserveSelection: false)
+            if failures.isEmpty {
+                self.showStatus("Deleted \(count) item\(count == 1 ? "" : "s") permanently")
+            } else {
+                self.showStatus(
+                    "Couldn’t delete \(failures.count) item\(failures.count == 1 ? "" : "s"). \(failures[0])",
+                    kind: .error
+                )
+            }
+        }
+    }
+
+    func emptyTrash(onVolume volumeRoot: URL) {
+        let trashURL = TrashService.volumeTrashURL(for: volumeRoot.standardizedFileURL)
+        guard FileManager.default.fileExists(atPath: trashURL.path) else {
+            showStatus("There is no volume trash to empty.", kind: .info)
+            return
+        }
+        let volumeName = volumeRoot.lastPathComponent
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Empty the Trash on “\(volumeName)”?"
+        alert.informativeText = "Items in \(trashURL.path) will be deleted permanently. This cannot be undone."
+        alert.addButton(withTitle: "Empty Trash")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        Task { [weak self] in
+            do {
+                let count = try await Task.detached(priority: .userInitiated) {
+                    try TrashService.emptyVolumeTrash(volumeRoot: volumeRoot)
+                }.value
+                self?.showStatus(
+                    count == 0
+                        ? "The volume trash was already empty"
+                        : "Emptied \(count) item\(count == 1 ? "" : "s") from “\(volumeName)” Trash"
+                )
+            } catch {
+                self?.showStatus("Couldn’t empty the volume trash: \(error.localizedDescription)", kind: .error)
+            }
+        }
+    }
+
     func showProperties() {
         guard let item = selectedItems.first, selection.count == 1 else { return }
         PropertiesWindowController.show(for: item.url)

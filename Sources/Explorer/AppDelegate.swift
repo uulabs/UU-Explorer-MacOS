@@ -251,7 +251,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
         window.isReleasedWhenClosed = false
-        window.isMovableByWindowBackground = true
+        // A full-size SwiftUI hierarchy makes AppKit's "drag from anywhere"
+        // opaque-region hit test expensive on every pointer move. Keep window
+        // dragging on the title bar; this avoids the hover lag.
+        window.isMovableByWindowBackground = false
         window.minSize = NSSize(width: 960, height: 560)
         window.backgroundColor = .windowBackgroundColor
         session.window = window

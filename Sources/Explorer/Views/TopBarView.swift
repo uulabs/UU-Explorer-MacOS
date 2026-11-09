@@ -384,6 +384,12 @@ struct MoreMenu: View {
                 }
             }
             Button("Find Large Files (100 MB+)") { model.findLargeFiles() }
+            if !model.selection.isEmpty {
+                Button("Delete Immediately…") { model.forceDeleteSelection() }
+            }
+            if let volume = model.volume, !volume.isInternal {
+                Button("Empty Trash on \(volume.name)…") { model.emptyTrash(onVolume: volume.rootURL) }
+            }
             if model.hasSearchCriteria {
                 Button("Save Search") { model.saveCurrentSearch() }
             }

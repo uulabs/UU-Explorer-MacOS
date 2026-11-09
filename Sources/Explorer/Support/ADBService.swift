@@ -67,9 +67,17 @@ final class ADBService: ObservableObject {
     }
 
     func refreshDevices() async -> [AndroidDevice] {
-        await Task { @MainActor in
-            refreshDevicesSync()
+        if adbPath == nil { adbPath = Self.locateADB() }
+        guard let path = adbPath else {
+            devices = []
+            return []
+        }
+        let result = await Task.detached(priority: .utility) {
+            Self.runStatic(path, ["devices", "-l"], timeout: 1.5)
         }.value
+        let parsed = Self.parseDevices(result.output)
+        devices = parsed
+        return parsed
     }
 
     func installAPK(_ apk: URL, on device: AndroidDevice, completion: @escaping (Result<String, Error>) -> Void) {

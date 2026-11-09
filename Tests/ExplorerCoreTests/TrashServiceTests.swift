@@ -44,4 +44,21 @@ final class TrashServiceTests: XCTestCase {
         let destination = try TrashService.moveToVolumeTrash(source, volumeRoot: tempDirectory)
         XCTAssertEqual(destination.lastPathComponent, "note 2.txt")
     }
+
+    func testEmptyVolumeTrashRemovesContentsButKeepsDirectory() throws {
+        let trash = TrashService.volumeTrashURL(for: tempDirectory)
+        try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+        try Data("one".utf8).write(to: trash.appendingPathComponent("one"))
+        try Data("two".utf8).write(to: trash.appendingPathComponent("two"))
+        XCTAssertEqual(try TrashService.emptyVolumeTrash(volumeRoot: tempDirectory), 2)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: trash.path))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: trash.path).count, 0)
+    }
+
+    func testPermanentDeleteRemovesItem() throws {
+        let target = tempDirectory.appendingPathComponent("target")
+        try Data("delete".utf8).write(to: target)
+        try TrashService.permanentDelete(target)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
+    }
 }

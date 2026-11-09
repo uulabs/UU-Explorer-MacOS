@@ -889,6 +889,7 @@ struct FileTableView: NSViewRepresentable {
                     enabled: selectedCount > 0
                 ))
                 menu.addItem(menuItem("Move to Trash", action: #selector(menuTrash(_:))))
+                menu.addItem(menuItem("Delete Immediately…", action: #selector(menuForceDelete(_:))))
                 let quick = NSMenu()
                 quick.addItem(menuItem("Duplicate", action: #selector(menuDuplicate(_:))))
                 quick.addItem(menuItem("Create Symbolic Link", action: #selector(menuCreateLink(_:))))
@@ -1108,6 +1109,7 @@ struct FileTableView: NSViewRepresentable {
         @objc private func menuShare(_ sender: Any?) { model.shareSelection() }
         @objc private func menuCalculateFolderSize(_ sender: Any?) { model.calculateSelectedFolderSizes() }
         @objc private func menuTrash(_ sender: Any?) { model.moveSelectionToTrash() }
+        @objc private func menuForceDelete(_ sender: Any?) { model.forceDeleteSelection() }
         @objc private func menuPaste(_ sender: Any?) { model.pasteFiles() }
         @objc private func menuRefresh(_ sender: Any?) { model.refresh() }
         @objc private func menuCalculateVisibleFolderSizes(_ sender: Any?) { model.calculateVisibleFolderSizes() }

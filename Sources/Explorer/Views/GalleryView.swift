@@ -360,6 +360,10 @@ struct GalleryView: View {
             prepareContextSelection(item)
             model.moveSelectionToTrash()
         }
+        Button("Delete Immediately…") {
+            prepareContextSelection(item)
+            model.forceDeleteSelection()
+        }
         Button("Properties…") {
             model.selection = [item.id]
             model.showProperties()

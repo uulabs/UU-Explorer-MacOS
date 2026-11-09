@@ -246,7 +246,7 @@ scripts/                     Portable app, DMG, release, test, and icon scripts
 swift test
 ```
 
-The repository includes 67 `ExplorerCore` tests covering path handling, sorting, archive round-trips, archive entry selection, search filters, folder comparison, batch rename planning, folder sizes, volume metadata, network address parsing, transfer byte accounting and verification, file hashing, and update release/checksum selection.
+The repository includes 69 `ExplorerCore` tests covering path handling, sorting, archive round-trips, archive entry selection, search filters, folder comparison, batch rename planning, folder sizes, volume metadata, network address parsing, transfer byte accounting and verification, file hashing, and update release/checksum selection.
 
 ## Security and privacy
 
