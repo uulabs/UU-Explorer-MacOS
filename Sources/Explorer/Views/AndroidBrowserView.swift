@@ -141,16 +141,8 @@ private final class AndroidBrowserModel: ObservableObject {
         }
     }
 
-    func push() {
-        guard let device = selectedDevice else { return }
-        let panel = NSOpenPanel()
-        panel.title = "Push to Android"
-        panel.prompt = "Push"
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = true
-        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
-        let urls = panel.urls
+    func push(urls: [URL]) {
+        guard let device = selectedDevice, !urls.isEmpty else { return }
         let destination = path
         status = "Pushing \(urls.count) item\(urls.count == 1 ? "" : "s")…"
         error = nil
@@ -184,9 +176,13 @@ private final class AndroidBrowserModel: ObservableObject {
 struct AndroidBrowserView: View {
     @StateObject private var browser: AndroidBrowserModel
     @Environment(\.dismiss) private var dismiss
+    @State private var isPickingPushFiles = false
 
-    init(preferredSerial: String? = nil) {
+    let initialDirectory: URL
+
+    init(preferredSerial: String? = nil, initialDirectory: URL? = nil) {
         _browser = StateObject(wrappedValue: AndroidBrowserModel(preferredSerial: preferredSerial))
+        self.initialDirectory = initialDirectory ?? FileManager.default.homeDirectoryForCurrentUser
     }
 
     var body: some View {
@@ -332,7 +328,7 @@ struct AndroidBrowserView: View {
                     .disabled(browser.selection.isEmpty)
                 Button("Pull Selected…") { browser.pullSelection() }
                     .disabled(browser.selection.isEmpty)
-                Button("Push…") { browser.push() }
+                Button("Push…") { isPickingPushFiles = true }
                     .disabled(browser.selectedDevice == nil)
             }
             .padding(14)
@@ -340,5 +336,10 @@ struct AndroidBrowserView: View {
         .frame(width: 820, height: 600)
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear { browser.refreshDevices() }
+        .sheet(isPresented: $isPickingPushFiles) {
+            MiniFilePickerView(initialDirectory: initialDirectory, destination: browser.path) { urls in
+                browser.push(urls: urls)
+            }
+        }
     }
 }

@@ -72,7 +72,10 @@ struct RootView: View {
             NetworkShareWizardView(model: model)
         }
         .sheet(isPresented: $model.isShowingAndroidBrowser) {
-            AndroidBrowserView(preferredSerial: model.androidBrowserSerial)
+            AndroidBrowserView(
+                preferredSerial: model.androidBrowserSerial,
+                initialDirectory: model.currentURL
+            )
         }
         .sheet(isPresented: $model.isShowingStorageUsage) {
             StorageUsageView(model: model)
