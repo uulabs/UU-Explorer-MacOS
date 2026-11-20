@@ -1692,8 +1692,11 @@ final class ExplorerModel: ObservableObject {
     }
 
     func showProperties() {
-        for item in selectedItems {
-            PropertiesWindowController.show(for: item.url)
+        let urls = selectedItems.map(\.url)
+        if urls.count == 1, let url = urls.first {
+            PropertiesWindowController.show(for: url)
+        } else if !urls.isEmpty {
+            SelectionPropertiesWindowController.show(for: urls)
         }
     }
 

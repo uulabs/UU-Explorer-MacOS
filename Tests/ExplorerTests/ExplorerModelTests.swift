@@ -171,7 +171,7 @@ final class ExplorerModelTests: XCTestCase {
         XCTAssertEqual(defaults.string(forKey: "UUExplorer.viewMode"), ViewMode.gallery.rawValue)
     }
 
-    func testPropertiesOpensForEverySelectedFolder() async throws {
+    func testPropertiesOpensOneAggregateWindowForMultipleFolders() async throws {
         let first = root.appendingPathComponent("First", isDirectory: true)
         let second = root.appendingPathComponent("Second", isDirectory: true)
         try FileManager.default.createDirectory(at: first, withIntermediateDirectories: false)
@@ -183,13 +183,33 @@ final class ExplorerModelTests: XCTestCase {
 
         model.showProperties()
         await waitUntil {
-            NSApp.windows.contains { $0.title == "First Properties" }
-                && NSApp.windows.contains { $0.title == "Second Properties" }
+            NSApp.windows.contains { $0.title == "2 Items Properties" }
         }
 
-        for window in NSApp.windows where window.title == "First Properties" || window.title == "Second Properties" {
+        XCTAssertFalse(NSApp.windows.contains { $0.title == "First Properties" })
+        XCTAssertFalse(NSApp.windows.contains { $0.title == "Second Properties" })
+        for window in NSApp.windows where window.title == "2 Items Properties" {
             window.close()
         }
+    }
+
+    func testSelectionPropertiesCalculatesCombinedTotals() async throws {
+        let first = root.appendingPathComponent("First", isDirectory: true)
+        let second = root.appendingPathComponent("Second", isDirectory: true)
+        try FileManager.default.createDirectory(at: first, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: second, withIntermediateDirectories: false)
+        try Data(repeating: 1, count: 3).write(to: first.appendingPathComponent("one.txt"))
+        try Data(repeating: 2, count: 5).write(to: second.appendingPathComponent("two.txt"))
+        let model = SelectionPropertiesModel(urls: [first, second])
+
+        model.calculateTotals()
+        await waitUntil { model.statistics.isComplete && !model.calculationTaskActive }
+
+        XCTAssertEqual(model.statistics.logicalBytes, 8)
+        XCTAssertEqual(model.statistics.fileCount, 2)
+        XCTAssertEqual(model.statistics.folderCount, 0)
+        XCTAssertEqual(model.completedRoots, 2)
+        model.cancel()
     }
 
     func testSmallListFilteringRemainsSynchronous() async throws {

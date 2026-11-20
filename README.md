@@ -65,7 +65,7 @@ UU Explorer is a real AppKit/SwiftUI application, not a Finder skin. It brings t
 - **Eject** external volumes and mounted disk images from the sidebar.
 - **Dual-pane F5/F6** copy and move between panes.
 - **Folder comparison sheet** for left-only, right-only, changed, and identical entries, with copy-left/right actions.
-- **Metadata inspector** for POSIX permissions, owner/group, hard links, xattrs, ACLs, symlinks, quarantine, image metadata, and streamed SHA-256. Properties supports multiple selected items and calculates recursive folder totals only on demand.
+- **Metadata inspector** for POSIX permissions, owner/group, hard links, xattrs, ACLs, symlinks, quarantine, image metadata, and streamed SHA-256. Multiple selected items open one combined Properties window with aggregate totals calculated only on demand.
 - **Custom details columns** for date created, size on disk, permissions, and owner, plus per-folder view/sort memory.
 - **Archive browser** with selective Open and Extract Selected, without unpacking unrelated files.
 - **Custom shell actions** with Selected Items or Current Folder scope, optional Terminal execution, and a persistent manager.
@@ -246,7 +246,7 @@ scripts/                     Portable app, DMG, release, test, and icon scripts
 swift test
 ```
 
-The repository includes **107 tests**: 77 `ExplorerCore` tests and 30 app integration tests. Coverage includes path handling, sorting, archive round-trips and extraction ownership, search filters and cancellation, folder comparison, batch rename planning, folder sizes, volume metadata, network address parsing, transfer progress/cancellation and verification, thumbnails, asynchronous navigation and creation, multi-item Properties, file hashing, and update release/checksum selection.
+The repository includes **108 tests**: 77 `ExplorerCore` tests and 31 app integration tests. Coverage includes path handling, sorting, archive round-trips and extraction ownership, search filters and cancellation, folder comparison, batch rename planning, folder sizes, volume metadata, network address parsing, transfer progress/cancellation and verification, thumbnails, asynchronous navigation and creation, multi-item Properties, file hashing, and update release/checksum selection.
 
 ## Security and privacy
 
