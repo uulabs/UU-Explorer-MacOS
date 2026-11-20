@@ -1,6 +1,12 @@
 import Foundation
 
 public struct VolumeMetadata: Equatable, Sendable {
+    public enum LoadResult: Equatable, Sendable {
+        case loaded(VolumeMetadata)
+        case notVolumeRoot
+        case unavailable
+    }
+
     public let name: String
     public let format: String
     public let mountPoint: String
@@ -27,8 +33,23 @@ public struct VolumeMetadata: Equatable, Sendable {
     }
 
     public static func load(for url: URL) -> VolumeMetadata? {
+        guard case .loaded(let volume) = resolve(for: url) else { return nil }
+        return volume
+    }
+
+    public static func resolve(for url: URL) -> LoadResult {
+        resolve(for: url, volumeRoots: nil)
+    }
+
+    static func resolve(for url: URL, volumeRoots: [URL]?) -> LoadResult {
         let target = url.standardizedFileURL
-        guard isVolumeRoot(target) else { return nil }
+        let roots = volumeRoots ?? FileManager.default.mountedVolumeURLs(
+            includingResourceValuesForKeys: nil,
+            options: [.skipHiddenVolumes]
+        ) ?? []
+        guard target.path == "/" || roots.contains(where: { $0.standardizedFileURL.path == target.path }) else {
+            return .notVolumeRoot
+        }
 
         let keys: Set<URLResourceKey> = [
             .volumeNameKey,
@@ -43,9 +64,9 @@ public struct VolumeMetadata: Equatable, Sendable {
             .volumeUUIDStringKey,
             .volumeIsRootFileSystemKey
         ]
-        guard let values = try? target.resourceValues(forKeys: keys) else { return nil }
+        guard let values = try? target.resourceValues(forKeys: keys) else { return .unavailable }
         let name = values.volumeName ?? (target.path == "/" ? "Macintosh HD" : target.lastPathComponent)
-        return VolumeMetadata(
+        return .loaded(VolumeMetadata(
             name: name,
             format: values.volumeLocalizedFormatDescription ?? "Volume",
             mountPoint: target.path,
@@ -58,7 +79,7 @@ public struct VolumeMetadata: Equatable, Sendable {
             isRemovable: values.volumeIsRemovable ?? false,
             isEjectable: values.volumeIsEjectable ?? false,
             isRootFileSystem: target.path == "/"
-        )
+        ))
     }
 
     public static func isVolumeRoot(_ url: URL) -> Bool {
@@ -67,6 +88,6 @@ public struct VolumeMetadata: Equatable, Sendable {
             includingResourceValuesForKeys: nil,
             options: [.skipHiddenVolumes]
         ) ?? []
-        return roots.contains { $0.standardizedFileURL.path == target.path }
+        return target.path == "/" || roots.contains { $0.standardizedFileURL.path == target.path }
     }
 }

@@ -19,8 +19,13 @@ public struct FolderStatistics: Sendable {
         isCancelled: @escaping () -> Bool = { false },
         progress: (FolderStatistics) -> Void = { _ in }
     ) -> FolderStatistics {
+        struct HardLinkIdentity: Hashable {
+            let device: dev_t
+            let inode: ino_t
+        }
+
         var result = FolderStatistics()
-        var allocatedIdentities = Set<String>()
+        var allocatedIdentities = Set<HardLinkIdentity>()
         var lastUpdate = Date.distantPast
 
         func add(_ url: URL, isRoot: Bool = false) -> Bool {
@@ -39,8 +44,12 @@ public struct FolderStatistics: Sendable {
             result.fileCount += 1
             if kind == mode_t(S_IFLNK) { result.symbolicLinkCount += 1 }
             result.logicalBytes += max(0, metadata.st_size)
-            let identity = "\(metadata.st_dev):\(metadata.st_ino)"
-            if metadata.st_nlink <= 1 || allocatedIdentities.insert(identity).inserted {
+            if metadata.st_nlink > 1 {
+                let identity = HardLinkIdentity(device: metadata.st_dev, inode: metadata.st_ino)
+                if allocatedIdentities.insert(identity).inserted {
+                    result.allocatedBytes += max(0, Int64(metadata.st_blocks) * 512)
+                }
+            } else {
                 result.allocatedBytes += max(0, Int64(metadata.st_blocks) * 512)
             }
             return false
@@ -62,8 +71,21 @@ public struct FolderStatistics: Sendable {
                 }
             )
             if let enumerator {
-                while !isCancelled(), let url = enumerator.nextObject() as? URL {
-                    _ = add(url)
+                var reachedEnd = false
+                while !reachedEnd && !isCancelled() {
+                    autoreleasepool {
+                        for _ in 0..<128 {
+                            if isCancelled() {
+                                reachedEnd = true
+                                break
+                            }
+                            guard let url = enumerator.nextObject() as? URL else {
+                                reachedEnd = true
+                                break
+                            }
+                            _ = add(url)
+                        }
+                    }
                     if Date().timeIntervalSince(lastUpdate) >= 0.2 {
                         progress(result)
                         lastUpdate = Date()

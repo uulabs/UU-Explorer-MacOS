@@ -186,6 +186,19 @@ struct ExplorerStatus: Identifiable, Equatable {
     let kind: Kind
 }
 
+private struct PreparedNavigation {
+    let directory: URL
+    let selection: Set<String>
+    let revealHidden: Bool
+    let folderName: String
+    let volume: VolumeInfo?
+}
+
+private struct PreparedExtraction: Sendable {
+    let destination: URL
+    let selection: URL
+}
+
 struct NameEditor: Identifiable {
     enum Mode: Equatable {
         case rename(URL)
@@ -231,6 +244,7 @@ final class ExplorerModel: ObservableObject {
     @Published private(set) var currentFolderName: String
     @Published private(set) var items: [FileItem] = []
     @Published private(set) var displayedItems: [FileItem] = []
+    private(set) var displayedItemsRevision = 0
     @Published var selection: Set<String> = []
     @Published private(set) var sortField: SortField
     @Published private(set) var sortAscending: Bool
@@ -274,6 +288,7 @@ final class ExplorerModel: ObservableObject {
     @Published var archiveBrowser: ArchiveBrowserRequest?
     @Published private(set) var folderSizes: [String: FolderSize] = [:]
     @Published private(set) var calculatingFolderPaths: Set<String> = []
+    private(set) var folderSizeRevision = 0
     @Published private(set) var isCalculatingFolderSizes = false
     @Published private(set) var folderSizeDone = 0
     @Published private(set) var folderSizeTotal = 0
@@ -289,14 +304,31 @@ final class ExplorerModel: ObservableObject {
     private let initialURL: URL
     private var history: [URL]
     private var historyIndex = 0
+    private var navigationGeneration = 0
     private var loadGeneration = 0
     private var loadTask: Task<Void, Never>?
+    private var volumeRefreshTask: Task<Void, Never>?
+    private var volumeRefreshPending = false
+    private var volumeObservers: [NSObjectProtocol] = []
+    private var ejectingVolumes: Set<String> = []
+    private var networkConnectionTasks: [UUID: Task<Void, Never>] = [:]
+    private var autoConnectTask: Task<Void, Never>?
+    private var namePreparationGeneration = 0
+    private var namePreparationTask: Task<Void, Never>?
+    private var nameSubmissionGeneration = 0
+    private var nameSubmissionTask: Task<Void, Never>?
+    private var isSubmittingNameEditor = false
     private var statusTask: Task<Void, Never>?
     private var revealTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
     private var searchCancellation: SearchCancellation?
     private var searchResults: [FileItem] = []
     private var searchGeneration = 0
+    private var searchPublicationTask: Task<Void, Never>?
+    private var visibleItemsTask: Task<Void, Never>?
+    private var visibleItemsGeneration = 0
+    private static let asynchronousSortThreshold = 256
+    private static let searchPublicationInterval: UInt64 = 75_000_000
     private var folderViewStates: [String: FolderViewState] = [:]
     private var restoringFolderView = false
     private var folderSizeTask: Task<Void, Never>?
@@ -307,11 +339,12 @@ final class ExplorerModel: ObservableObject {
     private var storageSizeGeneration = 0
     private var sharingPicker: NSSharingServicePicker?
     private var pendingSelection: Set<String>?
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
 
     private static let cutPasteboardType = NSPasteboard.PasteboardType("com.uulabs.explorer.cut-urls")
 
     let operations = FileOperationQueue()
+    private let extractionPreparationQueue = DispatchQueue(label: "com.uulabs.explorer.extraction-preparation")
     var openInNewTabHandler: ((URL) -> Void)?
     var transferToOtherPaneHandler: ((Bool) -> Void)?
 
@@ -321,7 +354,8 @@ final class ExplorerModel: ObservableObject {
     private var redoStack: [FileUndoRecord] = []
     private var undoTask: Task<Void, Never>?
 
-    init(startURL: URL? = nil) {
+    init(startURL: URL? = nil, defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         let homeURL = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL
         self.home = homeURL
         let start = (startURL ?? homeURL).standardizedFileURL
@@ -373,44 +407,30 @@ final class ExplorerModel: ObservableObject {
         let storedFavorites = defaults.array(forKey: "UUExplorer.favorites.v1") as? [String] ?? []
         self.favorites = storedFavorites
             .map { URL(fileURLWithPath: $0).standardizedFileURL }
-            .filter { url in
-                var isDirectory: ObjCBool = false
-                return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
-            }
             .reduce(into: [URL]()) { result, url in
                 if !result.contains(where: { $0.path == url.path }) { result.append(url) }
             }
 
-        if start.path == "/" {
-            self.currentFolderName = FileSystemService.volumeInfo(for: start)?.name ?? "Macintosh HD"
-        } else {
-            let name = FileManager.default.displayName(atPath: start.path)
-            self.currentFolderName = name.isEmpty ? start.lastPathComponent : name
+        self.currentFolderName = start.path == "/" ? "Macintosh HD" : start.lastPathComponent
+        self.volume = nil
+    }
+
+    deinit {
+        let center = NSWorkspace.shared.notificationCenter
+        for observer in volumeObservers {
+            center.removeObserver(observer)
         }
-        self.volume = FileSystemService.volumeInfo(for: start)
     }
 
     // MARK: Startup
 
     func start() {
-        treeRoots = FileSystemService.mountedVolumes().map {
-            TreeRoot(url: $0.url, name: $0.name, isInternal: $0.isInternal)
-        }
-        if treeRoots.isEmpty {
-            treeRoots = [TreeRoot(url: URL(fileURLWithPath: "/"), name: "Macintosh HD", isInternal: true)]
-        }
-
-        let startDirectory = FileSystemService.directoryExists(at: initialURL) ? initialURL : home
-        if startDirectory.path != initialURL.path {
-            history = [startDirectory]
-            historyIndex = 0
-        }
-        if startDirectory.path == currentURL.path {
-            restoreViewSettings(for: startDirectory)
-        }
+        treeRoots = [TreeRoot(url: URL(fileURLWithPath: "/"), name: "Macintosh HD", isInternal: true)]
         expandedPaths.insert("/")
+        observeVolumeChanges()
+        refreshVolumeRoots()
         Task { await loadTreeChildren(path: "/") }
-        openDirectory(startDirectory, pushHistory: false, selecting: nil)
+        openDirectory(initialURL, pushHistory: false, selecting: nil, fallbackDirectory: home)
     }
 
     // MARK: Derived state
@@ -457,23 +477,15 @@ final class ExplorerModel: ObservableObject {
     func openExternal(_ urls: [URL], reveal: Bool) {
         let localURLs = urls.filter(\.isFileURL).map(\.standardizedFileURL)
         guard let first = localURLs.first else { return }
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: first.path, isDirectory: &isDirectory) else {
-            openDirectory(first, pushHistory: true, selecting: nil)
-            return
-        }
-        if isDirectory.boolValue && !reveal {
-            openDirectory(first, pushHistory: true, selecting: nil)
-            return
-        }
         let parent = first.deletingLastPathComponent()
         let siblings = localURLs.filter { $0.deletingLastPathComponent() == parent }
-        // A hidden target must be visible to be selected. This does not persist the setting.
-        if siblings.contains(where: { $0.lastPathComponent.hasPrefix(".") ||
-            (try? $0.resourceValues(forKeys: [.isHiddenKey]).isHidden) == true }) {
-            showHidden = true
-        }
-        openDirectory(parent, pushHistory: true, selecting: Set(siblings.map(\.path)))
+        openDirectory(
+            first,
+            pushHistory: true,
+            selecting: Set(siblings.map(\.path)),
+            revealDirectory: reveal,
+            revealHiddenSelection: true
+        )
         if siblings.count != localURLs.count {
             showStatus("Showing items in the first requested folder.")
         }
@@ -566,16 +578,12 @@ final class ExplorerModel: ObservableObject {
             return false
         }
 
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
-            pathError = true
-            showStatus("The path “\(pathDraft)” can’t be found.", kind: .error)
-            return false
-        }
-
         isEditingPath = false
         pathError = false
-        openDirectory(url, pushHistory: true, selecting: nil)
+        openDirectory(url, pushHistory: true, selecting: nil, failure: { [weak self] in
+            self?.pathError = true
+            self?.isEditingPath = true
+        })
         return true
     }
 
@@ -684,22 +692,18 @@ final class ExplorerModel: ObservableObject {
 
     func runSavedSearch(_ search: SavedSearch) {
         let root = URL(fileURLWithPath: search.rootPath).standardizedFileURL
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory),
-              isDirectory.boolValue else {
-            showStatus("The saved search folder no longer exists.", kind: .error)
-            return
-        }
         searchScope = search.scope
-        openDirectory(root, pushHistory: true, selecting: nil)
-        searchFilter = search.filter ?? SearchFilter()
-        filterText = search.query
-        if search.scope == .recursive, hasSearchCriteria {
-            scheduleRecursiveSearch()
-        } else {
-            cancelRecursiveSearch()
-            rebuildVisibleItems()
-        }
+        openDirectory(root, pushHistory: true, selecting: nil, completion: { [weak self] in
+            guard let self else { return }
+            self.searchFilter = search.filter ?? SearchFilter()
+            self.filterText = search.query
+            if search.scope == .recursive, self.hasSearchCriteria {
+                self.scheduleRecursiveSearch()
+            } else {
+                self.cancelRecursiveSearch()
+                self.rebuildVisibleItems()
+            }
+        })
     }
 
     func removeSavedSearch(_ search: SavedSearch) {
@@ -715,6 +719,9 @@ final class ExplorerModel: ObservableObject {
     private func scheduleRecursiveSearch() {
         searchTask?.cancel()
         searchCancellation?.cancel()
+        searchPublicationTask?.cancel()
+        searchPublicationTask = nil
+        invalidateVisibleItems()
         searchGeneration &+= 1
         let generation = searchGeneration
         let root = currentURL.standardizedFileURL
@@ -727,7 +734,7 @@ final class ExplorerModel: ObservableObject {
         isSearching = true
         searchScanned = 0
         searchResults = []
-        displayedItems = []
+        applyVisibleItems([])
         selection = []
 
         searchTask = Task { [weak self] in
@@ -748,7 +755,7 @@ final class ExplorerModel: ObservableObject {
                 self.searchScanned = update.scanned
                 if !update.items.isEmpty {
                     self.searchResults.append(contentsOf: update.items)
-                    self.rebuildVisibleItems()
+                    self.scheduleSearchPublication()
                 }
                 if update.isFinal || update.scanned == 0 || update.scanned - lastStatusCount >= 512 {
                     lastStatusCount = update.scanned
@@ -758,6 +765,11 @@ final class ExplorerModel: ObservableObject {
                 }
             }
 
+            guard !Task.isCancelled, generation == self.searchGeneration else { return }
+            self.searchPublicationTask?.cancel()
+            self.searchPublicationTask = nil
+            self.rebuildVisibleItems()
+            await self.waitForVisibleItems()
             guard !Task.isCancelled, generation == self.searchGeneration else { return }
             self.isSearching = false
             self.searchCancellation = nil
@@ -778,12 +790,34 @@ final class ExplorerModel: ObservableObject {
         }
     }
 
+    private func scheduleSearchPublication() {
+        guard searchPublicationTask == nil else { return }
+        let generation = searchGeneration
+        searchPublicationTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.searchPublicationInterval)
+            guard let self, !Task.isCancelled, generation == self.searchGeneration else { return }
+            self.searchPublicationTask = nil
+            self.rebuildVisibleItems()
+        }
+    }
+
+    private func waitForVisibleItems() async {
+        while let task = visibleItemsTask {
+            let generation = visibleItemsGeneration
+            await task.value
+            if generation == visibleItemsGeneration { return }
+        }
+    }
+
     private func cancelRecursiveSearch() {
         searchGeneration &+= 1
         searchCancellation?.cancel()
         searchCancellation = nil
         searchTask?.cancel()
         searchTask = nil
+        searchPublicationTask?.cancel()
+        searchPublicationTask = nil
+        invalidateVisibleItems()
         isSearching = false
         searchScanned = 0
         searchResults = []
@@ -820,10 +854,20 @@ final class ExplorerModel: ObservableObject {
             showStatus("The startup disk can’t be ejected.", kind: .error)
             return
         }
+        guard ejectingVolumes.insert(target.path).inserted else { return }
         Task { [weak self] in
-            do {
-                try NSWorkspace.shared.unmountAndEjectDevice(at: target)
-                guard let self else { return }
+            let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
+                do {
+                    try NSWorkspace.shared.unmountAndEjectDevice(at: target)
+                    return .success(())
+                } catch {
+                    return .failure(error)
+                }
+            }.value
+            guard let self else { return }
+            self.ejectingVolumes.remove(target.path)
+            switch result {
+            case .success:
                 let wasInsideVolume = PathTools.isDescendant(self.currentURL, of: target)
                     || self.currentURL.path == target.path
                 self.refreshVolumeRoots()
@@ -831,25 +875,54 @@ final class ExplorerModel: ObservableObject {
                     self.goHome()
                 }
                 self.showStatus("Ejected “\(target.lastPathComponent)”")
-            } catch {
-                self?.showStatus("Couldn’t eject “\(target.lastPathComponent)”: \(error.localizedDescription)", kind: .error)
+            case .failure(let error):
+                self.showStatus("Couldn’t eject “\(target.lastPathComponent)”: \(error.localizedDescription)", kind: .error)
             }
         }
     }
 
+    private func observeVolumeChanges() {
+        guard volumeObservers.isEmpty else { return }
+        let center = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification] {
+            let observer = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    self?.refreshVolumeRoots()
+                }
+            }
+            volumeObservers.append(observer)
+        }
+    }
+
     private func refreshVolumeRoots() {
-        treeRoots = FileSystemService.mountedVolumes().map {
-            TreeRoot(url: $0.url, name: $0.name, isInternal: $0.isInternal)
+        guard volumeRefreshTask == nil else {
+            volumeRefreshPending = true
+            return
         }
-        if treeRoots.isEmpty {
-            treeRoots = [TreeRoot(url: URL(fileURLWithPath: "/"), name: "Macintosh HD", isInternal: true)]
-        }
-        let valid = Set(treeRoots.map(\.url.path))
-        expandedPaths = expandedPaths.filter { path in
-            path == "/" || valid.contains(where: { path == $0 || path.hasPrefix($0 + "/") })
-        }
-        treeChildren = treeChildren.filter { path, _ in
-            path == "/" || valid.contains(where: { path == $0 || path.hasPrefix($0 + "/") })
+        volumeRefreshTask = Task { [weak self] in
+            let mounts = await Task.detached(priority: .utility) {
+                FileSystemService.mountedVolumes()
+            }.value
+            guard let self else { return }
+            let roots = mounts.map {
+                TreeRoot(url: $0.url, name: $0.name, isInternal: $0.isInternal)
+            }
+            self.treeRoots = roots.isEmpty
+                ? [TreeRoot(url: URL(fileURLWithPath: "/"), name: "Macintosh HD", isInternal: true)]
+                : roots
+            let valid = Set(self.treeRoots.map(\.url.path))
+            self.expandedPaths = self.expandedPaths.filter { path in
+                path == "/" || valid.contains(where: { path == $0 || path.hasPrefix($0 + "/") })
+            }
+            self.treeChildren = self.treeChildren.filter { path, _ in
+                path == "/" || valid.contains(where: { path == $0 || path.hasPrefix($0 + "/") })
+            }
+            self.volumeRefreshTask = nil
+            self.ensureTreeReveal()
+            if self.volumeRefreshPending {
+                self.volumeRefreshPending = false
+                self.refreshVolumeRoots()
+            }
         }
     }
 
@@ -947,39 +1020,40 @@ final class ExplorerModel: ObservableObject {
         )
     }
 
-    func restoreTabState(_ state: ExplorerTabState) {
+    func restoreTabState(_ state: ExplorerTabState, completion: ((Bool) -> Void)? = nil) {
         let url = URL(fileURLWithPath: state.path).standardizedFileURL
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
-              isDirectory.boolValue else {
-            showStatus("“\(state.path)” can’t be found.", kind: .error)
-            return
-        }
-
-        nameEditor = nil
-        isEditingPath = false
-        pathDraft = ""
-        pathError = false
-        sortField = SortField(rawValue: state.sortField) ?? sortField
-        sortAscending = state.sortAscending
-        showHidden = state.showHidden
-        viewMode = ViewMode(rawValue: state.viewMode) ?? viewMode
-
         var restoredHistory = state.history.map { URL(fileURLWithPath: $0).standardizedFileURL }
         if restoredHistory.isEmpty {
             restoredHistory = [url]
         }
-        history = restoredHistory
-        historyIndex = min(max(state.historyIndex, 0), restoredHistory.count - 1)
-        canGoBack = historyIndex > 0
-        canGoForward = historyIndex < restoredHistory.count - 1
 
-        let savedFilter = state.filterText
-        openDirectory(url, pushHistory: false, selecting: Set(state.selection))
-        if !savedFilter.isEmpty {
-            filterText = savedFilter
-            rebuildVisibleItems()
-        }
+        openDirectory(
+            url,
+            pushHistory: false,
+            selecting: Set(state.selection),
+            beforeLoad: { [weak self] in
+                guard let self else { return }
+                self.cancelNameEditor()
+                self.isEditingPath = false
+                self.pathDraft = ""
+                self.pathError = false
+                self.sortField = SortField(rawValue: state.sortField) ?? self.sortField
+                self.sortAscending = state.sortAscending
+                self.showHidden = state.showHidden
+                self.viewMode = ViewMode(rawValue: state.viewMode) ?? self.viewMode
+                self.history = restoredHistory
+                self.historyIndex = min(max(state.historyIndex, 0), restoredHistory.count - 1)
+                self.canGoBack = self.historyIndex > 0
+                self.canGoForward = self.historyIndex < restoredHistory.count - 1
+                self.filterText = state.filterText
+            },
+            completion: {
+                completion?(true)
+            },
+            failure: {
+                completion?(false)
+            }
+        )
     }
 
     func openInNewTab(_ url: URL) {
@@ -1027,20 +1101,27 @@ final class ExplorerModel: ObservableObject {
 
     func toggleFavorite(_ url: URL) {
         let directory = url.standardizedFileURL
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            showStatus("Only folders can be added to Favourites.", kind: .error)
+        if let index = favorites.firstIndex(where: { $0.standardizedFileURL.path == directory.path }) {
+            favorites.remove(at: index)
+            defaults.set(favorites.map(\.path), forKey: "UUExplorer.favorites.v1")
+            showStatus("Removed from Favourites")
             return
         }
 
-        if let index = favorites.firstIndex(where: { $0.standardizedFileURL.path == directory.path }) {
-            favorites.remove(at: index)
-            showStatus("Removed from Favourites")
-        } else {
-            favorites.append(directory)
-            showStatus("Added to Favourites")
+        Task { [weak self] in
+            let isDirectory = await Task.detached(priority: .userInitiated) {
+                FileSystemService.directoryExists(at: directory)
+            }.value
+            guard let self else { return }
+            guard isDirectory else {
+                self.showStatus("Only folders can be added to Favourites.", kind: .error)
+                return
+            }
+            guard !self.favorites.contains(where: { $0.standardizedFileURL.path == directory.path }) else { return }
+            self.favorites.append(directory)
+            self.defaults.set(self.favorites.map(\.path), forKey: "UUExplorer.favorites.v1")
+            self.showStatus("Added to Favourites")
         }
-        defaults.set(favorites.map(\.path), forKey: "UUExplorer.favorites.v1")
     }
 
     func toggleCurrentFolderFavorite() {
@@ -1110,31 +1191,42 @@ final class ExplorerModel: ObservableObject {
     }
 
     func extractHere(_ archive: URL) {
-        let parent = archive.deletingLastPathComponent().standardizedFileURL
-        let stem = archiveStem(for: archive)
-        let top = ArchiveService.topLevelDirectoryName(archive)
-        let topURL = top.map { parent.appendingPathComponent($0) }
+        let preparationQueue = extractionPreparationQueue
+        Task { [weak self] in
+            let result: Result<PreparedExtraction, Error> = await Task.detached(priority: .userInitiated) {
+                preparationQueue.sync {
+                    do {
+                        let parent = archive.deletingLastPathComponent()
+                        let top = ArchiveService.topLevelDirectoryName(archive)
+                        let topURL = top.map { parent.appendingPathComponent($0) }
+                        if let topURL {
+                            do {
+                                try FileManager.default.createDirectory(at: topURL, withIntermediateDirectories: false)
+                                return .success(PreparedExtraction(destination: parent, selection: topURL))
+                            } catch let error as NSError
+                                where error.domain == NSCocoaErrorDomain && error.code == NSFileWriteFileExistsError {
+                            }
+                        }
 
-        let destination: URL
-        let selection: URL?
-        if let topURL, !FileManager.default.fileExists(atPath: topURL.path) {
-            destination = parent
-            selection = topURL
-        } else {
-            let wrapper = FileName.uniqueURL(in: parent, baseName: stem)
-            do {
-                try FileManager.default.createDirectory(at: wrapper, withIntermediateDirectories: false)
-            } catch {
-                showStatus("Couldn’t create the extraction folder. \(error.localizedDescription)", kind: .error)
-                return
+                        let wrapper = FileName.uniqueURL(in: parent, baseName: Self.archiveStem(for: archive))
+                        try FileManager.default.createDirectory(at: wrapper, withIntermediateDirectories: false)
+                        return .success(PreparedExtraction(destination: wrapper, selection: wrapper))
+                    } catch {
+                        return .failure(error)
+                    }
+                }
+            }.value
+            guard let self else { return }
+            switch result {
+            case .success(let prepared):
+                self.extract(archive, to: prepared.destination, selecting: prepared.selection)
+            case .failure(let error):
+                self.showStatus("Couldn’t create the extraction folder. \(error.localizedDescription)", kind: .error)
             }
-            destination = wrapper
-            selection = wrapper
         }
-        extract(archive, to: destination, selecting: selection)
     }
 
-    private func archiveStem(for archive: URL) -> String {
+    private nonisolated static func archiveStem(for archive: URL) -> String {
         let name = archive.lastPathComponent
         let lower = name.lowercased()
         for suffix in [".tar.gz", ".tgz", ".zip", ".tar"] where lower.hasSuffix(suffix) {
@@ -1238,17 +1330,47 @@ final class ExplorerModel: ObservableObject {
     }
 
     func beginNewFolder() {
-        isEditingPath = false
-        if !filterText.isEmpty { setFilter("") }
-        let unique = FileName.uniqueURL(in: currentURL, baseName: "New Folder")
-        nameEditor = NameEditor(mode: .newFolder(currentURL), text: unique.lastPathComponent, error: nil)
+        beginNewFolder(in: currentURL)
+    }
+
+    func beginNewFolder(in directory: URL) {
+        let target = directory.standardizedFileURL
+        prepareNewItem(in: target, baseName: "New Folder", pathExtension: nil) {
+            .newFolder(target)
+        }
     }
 
     func beginNewFile() {
+        let target = currentURL
+        prepareNewItem(in: target, baseName: "New File", pathExtension: "txt") {
+            .newFile(target)
+        }
+    }
+
+    private func prepareNewItem(
+        in directory: URL,
+        baseName: String,
+        pathExtension: String?,
+        mode: @escaping () -> NameEditor.Mode
+    ) {
+        guard !isSubmittingNameEditor else { return }
+        namePreparationGeneration &+= 1
+        let generation = namePreparationGeneration
+        namePreparationTask?.cancel()
         isEditingPath = false
-        if !filterText.isEmpty { setFilter("") }
-        let unique = FileName.uniqueURL(in: currentURL, baseName: "New File", pathExtension: "txt")
-        nameEditor = NameEditor(mode: .newFile(currentURL), text: unique.lastPathComponent, error: nil)
+        if directory.path == currentURL.standardizedFileURL.path, !filterText.isEmpty {
+            setFilter("")
+        }
+        namePreparationTask = Task { [weak self] in
+            let unique = await Task.detached(priority: .userInitiated) {
+                FileName.uniqueURL(in: directory, baseName: baseName, pathExtension: pathExtension)
+            }.value
+            guard let self,
+                  !Task.isCancelled,
+                  generation == self.namePreparationGeneration else { return }
+            self.namePreparationTask = nil
+            self.nameEditor = NameEditor(mode: mode(), text: unique.lastPathComponent, error: nil)
+        }
     }
 
     func beginBatchRename() {
@@ -1306,7 +1428,7 @@ final class ExplorerModel: ObservableObject {
     }
 
     func submitNameEditor(_ rawName: String) {
-        guard var editor = nameEditor else { return }
+        guard var editor = nameEditor, !isSubmittingNameEditor else { return }
         let name = rawName
 
         if let validation = FileName.validationError(for: name) {
@@ -1347,53 +1469,88 @@ final class ExplorerModel: ObservableObject {
             }
 
         case .newFolder(let directory):
-            let destination = directory.appendingPathComponent(name)
-            guard !FileManager.default.fileExists(atPath: destination.path) else {
-                editor.error = "An item named “\(name)” already exists."
-                nameEditor = editor
-                return
-            }
-            do {
-                try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
-                registerFileUndo(
-                    title: "New Folder",
-                    undo: { _ = try TrashService.recycle(destination) },
-                    redo: { try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false) }
-                )
-                invalidateTree(directory)
-                nameEditor = nil
-                reload(preserveSelection: false, selecting: [destination.path])
-                showStatus("Created folder “\(name)”")
-            } catch {
-                editor.error = error.localizedDescription
-                nameEditor = editor
-            }
+            createNewItem(editor: editor, name: name, in: directory, isFolder: true)
 
         case .newFile(let directory):
-            let destination = directory.appendingPathComponent(name)
-            guard !FileManager.default.fileExists(atPath: destination.path) else {
-                editor.error = "An item named “\(name)” already exists."
-                nameEditor = editor
-                return
+            createNewItem(editor: editor, name: name, in: directory, isFolder: false)
+        }
+    }
+
+    private func createNewItem(editor: NameEditor, name: String, in directory: URL, isFolder: Bool) {
+        let destination = directory.appendingPathComponent(name)
+        isSubmittingNameEditor = true
+        nameSubmissionGeneration &+= 1
+        let generation = nameSubmissionGeneration
+        nameSubmissionTask = Task { [weak self] in
+            let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
+                do {
+                    if FileManager.default.fileExists(atPath: destination.path) {
+                        throw CocoaError(.fileWriteFileExists)
+                    }
+                    if isFolder {
+                        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
+                    } else {
+                        try Data().write(to: destination, options: .withoutOverwriting)
+                    }
+                    return .success(())
+                } catch {
+                    return .failure(error)
+                }
+            }.value
+            guard let self else { return }
+            let isCurrentGeneration = generation == self.nameSubmissionGeneration
+            let isPresentedEditor = isCurrentGeneration && self.nameEditor?.id == editor.id
+            if isCurrentGeneration {
+                self.isSubmittingNameEditor = false
+                self.nameSubmissionTask = nil
             }
-            do {
-                try Data().write(to: destination, options: .withoutOverwriting)
-                registerFileUndo(
-                    title: "New File",
-                    undo: { _ = try TrashService.recycle(destination) },
-                    redo: { try Data().write(to: destination, options: .withoutOverwriting) }
-                )
-                nameEditor = nil
-                reload(preserveSelection: false, selecting: [destination.path])
-                showStatus("Created “\(name)”")
-            } catch {
-                editor.error = error.localizedDescription
-                nameEditor = editor
+
+            switch result {
+            case .success:
+                if isFolder {
+                    self.registerFileUndo(
+                        title: "New Folder",
+                        undo: { _ = try TrashService.recycle(destination) },
+                        redo: {
+                            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
+                        }
+                    )
+                    self.invalidateTree(directory)
+                } else {
+                    self.registerFileUndo(
+                        title: "New File",
+                        undo: { _ = try TrashService.recycle(destination) },
+                        redo: { try Data().write(to: destination, options: .withoutOverwriting) }
+                    )
+                }
+                if isPresentedEditor {
+                    self.nameEditor = nil
+                }
+                if self.currentURL.standardizedFileURL.path == directory.standardizedFileURL.path {
+                    self.reload(preserveSelection: false, selecting: [destination.path])
+                }
+                self.showStatus(isFolder ? "Created folder “\(name)”" : "Created “\(name)”")
+            case .failure(let error):
+                guard isPresentedEditor else { return }
+                var failedEditor = editor
+                if (error as? CocoaError)?.code == .fileWriteFileExists {
+                    failedEditor.error = "An item named “\(name)” already exists."
+                } else {
+                    failedEditor.error = error.localizedDescription
+                }
+                self.nameEditor = failedEditor
             }
         }
     }
 
     func cancelNameEditor() {
+        namePreparationGeneration &+= 1
+        namePreparationTask?.cancel()
+        namePreparationTask = nil
+        nameSubmissionGeneration &+= 1
+        nameSubmissionTask?.cancel()
+        nameSubmissionTask = nil
+        isSubmittingNameEditor = false
         nameEditor = nil
     }
 
@@ -1535,8 +1692,9 @@ final class ExplorerModel: ObservableObject {
     }
 
     func showProperties() {
-        guard let item = selectedItems.first, selection.count == 1 else { return }
-        PropertiesWindowController.show(for: item.url)
+        for item in selectedItems {
+            PropertiesWindowController.show(for: item.url)
+        }
     }
 
     func revealSelectionInFinder() {
@@ -2130,54 +2288,63 @@ final class ExplorerModel: ObservableObject {
     }
 
     func connectNetworkLocation(_ location: NetworkLocation) {
-        if let mounted = mountedNetworkURL(for: location) {
-            openDirectory(mounted, pushHistory: true, selecting: nil)
-            return
-        }
-        guard let url = location.url else {
-            showStatus("The network address is invalid.", kind: .error)
-            return
-        }
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = false
-        NSWorkspace.shared.open(url, configuration: configuration) { _, error in
-            if let error {
-                Task { @MainActor in
-                    self.showStatus("Couldn’t mount \(location.name): \(error.localizedDescription)", kind: .error)
+        guard networkConnectionTasks[location.id] == nil else { return }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            if let mounted = await self.mountedNetworkURL(for: location) {
+                self.networkConnectionTasks[location.id] = nil
+                self.openDirectory(mounted, pushHistory: true, selecting: nil)
+                return
+            }
+            guard let url = location.url else {
+                self.networkConnectionTasks[location.id] = nil
+                self.showStatus("The network address is invalid.", kind: .error)
+                return
+            }
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = false
+            NSWorkspace.shared.open(url, configuration: configuration) { [weak self] _, error in
+                if let error {
+                    Task { @MainActor in
+                        self?.showStatus("Couldn’t mount \(location.name): \(error.localizedDescription)", kind: .error)
+                    }
                 }
             }
-        }
-        showStatus("Mounting \(location.name)…")
+            self.showStatus("Mounting \(location.name)…")
 
-        // The system owns authentication/mounting. Once it has finished, keep
-        // the result inside UU Explorer instead of requiring another click.
-        Task { [weak self] in
+            // The system owns authentication/mounting. Once it has finished, keep
+            // the result inside UU Explorer instead of requiring another click.
             for _ in 0..<20 {
                 try? await Task.sleep(nanoseconds: 500_000_000)
-                guard let self else { return }
-                if let mounted = self.mountedNetworkURL(for: location) {
+                guard !Task.isCancelled else { break }
+                if let mounted = await self.mountedNetworkURL(for: location) {
+                    self.networkConnectionTasks[location.id] = nil
                     self.refreshVolumeRoots()
                     self.openDirectory(mounted, pushHistory: true, selecting: nil)
                     NSApp.activate(ignoringOtherApps: true)
                     return
                 }
             }
+            self.networkConnectionTasks[location.id] = nil
         }
+        networkConnectionTasks[location.id] = task
     }
 
-    private func mountedNetworkURL(for location: NetworkLocation) -> URL? {
-        guard let url = location.url else { return nil }
-        let share = url.pathComponents.last?.lowercased() ?? ""
-        guard !share.isEmpty, share != "/" else { return nil }
-        let volumes = FileManager.default.mountedVolumeURLs(
-            includingResourceValuesForKeys: [.volumeNameKey],
-            options: [.skipHiddenVolumes]
-        ) ?? []
-        return volumes.first { volume in
-            let mountName = volume.lastPathComponent.lowercased()
-            let volumeName = (try? volume.resourceValues(forKeys: [.volumeNameKey]).volumeName)?.lowercased() ?? ""
-            return mountName == share || volumeName == share
-        }
+    private func mountedNetworkURL(for location: NetworkLocation) async -> URL? {
+        await Task.detached(priority: .utility) {
+            guard let url = location.url else { return nil }
+            let share = url.pathComponents.last?.lowercased() ?? ""
+            guard !share.isEmpty, share != "/" else { return nil }
+            let volumes = FileManager.default.mountedVolumeURLs(
+                includingResourceValuesForKeys: [.volumeNameKey],
+                options: [.skipHiddenVolumes]
+            ) ?? []
+            return volumes.first { volume in
+                let mountName = volume.lastPathComponent.lowercased()
+                let volumeName = (try? volume.resourceValues(forKeys: [.volumeNameKey]).volumeName)?.lowercased() ?? ""
+                return mountName == share || volumeName == share
+            }
+        }.value
     }
 
     func toggleNetworkAutoConnect(_ location: NetworkLocation) {
@@ -2192,19 +2359,31 @@ final class ExplorerModel: ObservableObject {
     }
 
     func autoConnectNetworkLocations() {
-        let mountedNames = Set(
-            (FileManager.default.mountedVolumeURLs(
-                includingResourceValuesForKeys: [.volumeNameKey],
-                options: [.skipHiddenVolumes]
-            ) ?? []).map { $0.lastPathComponent.lowercased() }
-        )
-        for location in networkLocations where location.autoConnect {
-            guard let url = location.url else { continue }
-            let shareName = url.lastPathComponent.lowercased()
-            if !shareName.isEmpty, mountedNames.contains(shareName) { continue }
-            let configuration = NSWorkspace.OpenConfiguration()
-            configuration.activates = false
-            NSWorkspace.shared.open(url, configuration: configuration)
+        guard autoConnectTask == nil else { return }
+        let locations = networkLocations.filter(\.autoConnect)
+        autoConnectTask = Task { [weak self] in
+            let mountedNames = await Task.detached(priority: .utility) {
+                Set(
+                    (FileManager.default.mountedVolumeURLs(
+                        includingResourceValuesForKeys: [.volumeNameKey],
+                        options: [.skipHiddenVolumes]
+                    ) ?? []).map { $0.lastPathComponent.lowercased() }
+                )
+            }.value
+            guard let self else { return }
+            let urls = locations.compactMap { location -> URL? in
+                guard self.networkConnectionTasks[location.id] == nil,
+                      let url = location.url else { return nil }
+                let shareName = url.lastPathComponent.lowercased()
+                if !shareName.isEmpty, mountedNames.contains(shareName) { return nil }
+                return url
+            }
+            self.autoConnectTask = nil
+            for url in urls {
+                let configuration = NSWorkspace.OpenConfiguration()
+                configuration.activates = false
+                NSWorkspace.shared.open(url, configuration: configuration) { _, _ in }
+            }
         }
     }
 
@@ -2259,6 +2438,7 @@ final class ExplorerModel: ObservableObject {
         folderSizeDone = 0
         folderSizeTotal = directories.count
         isCalculatingFolderSizes = true
+        folderSizeRevision &+= 1
         calculatingFolderPaths = Set(directories.map(\.path))
         let total = directories.count
 
@@ -2273,6 +2453,7 @@ final class ExplorerModel: ObservableObject {
                 let size = await worker.value
                 guard generation == self.folderSizeGeneration else { return }
                 if Task.isCancelled { break }
+                self.folderSizeRevision &+= 1
                 self.folderSizes[url.path] = size
                 self.calculatingFolderPaths.remove(url.path)
                 self.folderSizeDone += 1
@@ -2281,7 +2462,10 @@ final class ExplorerModel: ObservableObject {
             self.folderSizeTask = nil
             self.folderSizeWorker = nil
             self.isCalculatingFolderSizes = false
-            self.calculatingFolderPaths = []
+            if !self.calculatingFolderPaths.isEmpty {
+                self.folderSizeRevision &+= 1
+                self.calculatingFolderPaths = []
+            }
             if Task.isCancelled {
                 self.showStatus("Folder size calculation cancelled")
             } else {
@@ -2302,7 +2486,10 @@ final class ExplorerModel: ObservableObject {
         folderSizeTask = nil
         folderSizeWorker = nil
         isCalculatingFolderSizes = false
-        calculatingFolderPaths = []
+        if !calculatingFolderPaths.isEmpty {
+            folderSizeRevision &+= 1
+            calculatingFolderPaths = []
+        }
         if announce, wasRunning {
             showStatus("Folder size calculation cancelled")
         }
@@ -2485,68 +2672,127 @@ final class ExplorerModel: ObservableObject {
 
     // MARK: Internal loading
 
-    private func openDirectory(_ target: URL, pushHistory: Bool, selecting selectionPaths: Set<String>?) {
-        var directory = target.standardizedFileURL
-        var pending = selectionPaths ?? []
+    private func openDirectory(
+        _ target: URL,
+        pushHistory: Bool,
+        selecting selectionPaths: Set<String>?,
+        revealDirectory: Bool = false,
+        revealHiddenSelection: Bool = false,
+        fallbackDirectory: URL? = nil,
+        beforeLoad: (() -> Void)? = nil,
+        completion: (() -> Void)? = nil,
+        failure: (() -> Void)? = nil
+    ) {
+        let requested = target.standardizedFileURL
+        navigationGeneration &+= 1
+        let generation = navigationGeneration
 
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory) else {
-            showStatus("“\(directory.lastPathComponent)” can’t be found.", kind: .error)
-            return
-        }
+        Task { [weak self] in
+            let prepared = await Task.detached(priority: .userInitiated) { () -> PreparedNavigation? in
+                var directory = requested
+                var pending = selectionPaths ?? []
+                var isDirectory: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory) else {
+                    return nil
+                }
 
-        if !isDirectory.boolValue {
-            pending.insert(directory.path)
-            directory = directory.deletingLastPathComponent().standardizedFileURL
-        }
+                if isDirectory.boolValue && !revealDirectory {
+                    if revealHiddenSelection { pending = [] }
+                } else {
+                    pending.insert(directory.path)
+                    directory = directory.deletingLastPathComponent().standardizedFileURL
+                }
 
-        let changed = directory.path != currentURL.path
-        if pushHistory {
-            recordHistory(directory)
-        }
+                let revealHidden = revealHiddenSelection && pending.contains { path in
+                    let url = URL(fileURLWithPath: path)
+                    return url.lastPathComponent.hasPrefix(".")
+                        || (try? url.resourceValues(forKeys: [.isHiddenKey]).isHidden) == true
+                }
+                let volume = FileSystemService.volumeInfo(for: directory)
+                let folderName: String
+                if directory.path == "/" {
+                    folderName = volume?.name ?? "Macintosh HD"
+                } else {
+                    let name = FileManager.default.displayName(atPath: directory.path)
+                    folderName = name.isEmpty ? directory.lastPathComponent : name
+                }
+                return PreparedNavigation(
+                    directory: directory,
+                    selection: pending,
+                    revealHidden: revealHidden,
+                    folderName: folderName,
+                    volume: volume
+                )
+            }.value
 
-        cancelRecursiveSearch()
-        cancelFolderSizeCalculation(announce: false)
-        storageSizeGeneration &+= 1
-        storageSizeTask?.cancel()
-        storageSizeWorker?.cancel()
-        storageSizeTask = nil
-        storageSizeWorker = nil
-        isCalculatingStorageSize = false
-        storageFolderSize = nil
-        if changed {
-            rememberViewSettings(for: currentURL)
-        }
-        currentURL = directory
-        restoreViewSettings(for: directory)
-        volume = FileSystemService.volumeInfo(for: directory)
-        currentFolderName = displayName(for: directory)
-        isEditingPath = false
-        pathError = false
-        pathDraft = ""
-        filterText = ""
-        searchFilter = SearchFilter()
-        if let data = try? JSONEncoder().encode(searchFilter) {
-            defaults.set(data, forKey: "UUExplorer.searchFilter.v1")
-        }
+            guard let self, generation == self.navigationGeneration else { return }
+            guard let prepared else {
+                if let fallbackDirectory, fallbackDirectory.standardizedFileURL.path != requested.path {
+                    let fallback = fallbackDirectory.standardizedFileURL
+                    self.history = [fallback]
+                    self.historyIndex = 0
+                    self.canGoBack = false
+                    self.canGoForward = false
+                    self.openDirectory(
+                        fallback,
+                        pushHistory: false,
+                        selecting: nil,
+                        completion: completion,
+                        failure: failure
+                    )
+                    return
+                }
+                self.showStatus("“\(requested.lastPathComponent)” can’t be found.", kind: .error)
+                failure?()
+                return
+            }
 
-        if changed {
-            items = []
-            displayedItems = []
-            selection = []
-        }
-        pendingSelection = pending
+            let directory = prepared.directory
+            let changed = directory.path != self.currentURL.path
+            if pushHistory {
+                self.recordHistory(directory)
+            }
 
-        loadItems()
-        ensureTreeReveal()
-    }
+            self.cancelRecursiveSearch()
+            self.cancelFolderSizeCalculation(announce: false)
+            self.storageSizeGeneration &+= 1
+            self.storageSizeTask?.cancel()
+            self.storageSizeWorker?.cancel()
+            self.storageSizeTask = nil
+            self.storageSizeWorker = nil
+            self.isCalculatingStorageSize = false
+            self.storageFolderSize = nil
+            if changed {
+                self.rememberViewSettings(for: self.currentURL)
+            }
+            if prepared.revealHidden {
+                self.showHidden = true
+            }
+            self.currentURL = directory
+            self.restoreViewSettings(for: directory)
+            self.volume = prepared.volume
+            self.currentFolderName = prepared.folderName
+            self.isEditingPath = false
+            self.pathError = false
+            self.pathDraft = ""
+            self.filterText = ""
+            self.searchFilter = SearchFilter()
+            if let data = try? JSONEncoder().encode(self.searchFilter) {
+                self.defaults.set(data, forKey: "UUExplorer.searchFilter.v1")
+            }
 
-    private func displayName(for directory: URL) -> String {
-        if directory.path == "/" {
-            return volume?.name ?? "Macintosh HD"
+            if changed {
+                self.items = []
+                self.applyVisibleItems([])
+                self.selection = []
+            }
+            self.pendingSelection = prepared.selection
+            beforeLoad?()
+
+            self.loadItems()
+            self.ensureTreeReveal()
+            completion?()
         }
-        let name = FileManager.default.displayName(atPath: directory.path)
-        return name.isEmpty ? directory.lastPathComponent : name
     }
 
     private func recordHistory(_ url: URL) {
@@ -2575,6 +2821,7 @@ final class ExplorerModel: ObservableObject {
 
         isLoading = true
         loadError = nil
+        invalidateVisibleItems()
         loadTask?.cancel()
         loadTask = Task { [weak self] in
             let result: ([FileItem], String?) = await Task.detached(priority: .userInitiated) {
@@ -2590,7 +2837,7 @@ final class ExplorerModel: ObservableObject {
 
             if let error = result.1 {
                 self.items = []
-                self.displayedItems = []
+                self.applyVisibleItems([])
                 self.loadError = "Can’t open “\(self.currentFolderName)”. \(error)"
                 self.showStatus(self.loadError ?? "Can’t open folder.", kind: .error)
                 return
@@ -2616,19 +2863,53 @@ final class ExplorerModel: ObservableObject {
     }
 
     private func rebuildVisibleItems() {
-        let filtered: [FileItem]
-        if isRecursiveSearchActive {
-            filtered = searchResults
-        } else if hasSearchCriteria {
-            let query = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
-            filtered = items.filter { item in
-                (query.isEmpty || item.name.localizedCaseInsensitiveContains(query))
-                    && searchFilter.matches(item)
-            }
-        } else {
-            filtered = items
+        invalidateVisibleItems()
+        let generation = visibleItemsGeneration
+        let source = isRecursiveSearchActive ? searchResults : items
+        let query = !isRecursiveSearchActive && hasSearchCriteria
+            ? filterText.trimmingCharacters(in: .whitespacesAndNewlines)
+            : nil
+        let filter = searchFilter
+        let field = sortField
+        let ascending = sortAscending
+
+        guard source.count >= Self.asynchronousSortThreshold else {
+            let filtered = Self.filterItems(source, query: query, filter: filter)
+            applyVisibleItems(FileSorter.sorted(filtered, by: field, ascending: ascending))
+            return
         }
-        let sorted = FileSorter.sorted(filtered, by: sortField, ascending: sortAscending)
+
+        visibleItemsTask = Task { [weak self] in
+            let sorted = await Task.detached(priority: .userInitiated) {
+                let filtered = Self.filterItems(source, query: query, filter: filter)
+                return FileSorter.sorted(filtered, by: field, ascending: ascending)
+            }.value
+            guard let self, !Task.isCancelled, generation == self.visibleItemsGeneration else { return }
+            self.visibleItemsTask = nil
+            self.applyVisibleItems(sorted)
+        }
+    }
+
+    private nonisolated static func filterItems(
+        _ source: [FileItem],
+        query: String?,
+        filter: SearchFilter
+    ) -> [FileItem] {
+        guard let query else { return source }
+        return source.filter { item in
+            (query.isEmpty || item.name.localizedCaseInsensitiveContains(query))
+                && filter.matches(item)
+        }
+    }
+
+    private func invalidateVisibleItems() {
+        visibleItemsGeneration &+= 1
+        visibleItemsTask?.cancel()
+        visibleItemsTask = nil
+    }
+
+    private func applyVisibleItems(_ sorted: [FileItem]) {
+        displayedItemsRevision &+= 1
         displayedItems = sorted
         let visibleIDs = Set(sorted.map(\.id))
         if !selection.isSubset(of: visibleIDs) {

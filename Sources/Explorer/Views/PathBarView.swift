@@ -1,6 +1,23 @@
 import ExplorerCore
 import SwiftUI
 
+private final class PathCompletionCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func cancel() {
+        lock.lock()
+        value = true
+        lock.unlock()
+    }
+}
+
 struct PathBarView: View {
     @ObservedObject var model: ExplorerModel
     @EnvironmentObject private var themeStore: ThemeStore
@@ -10,6 +27,8 @@ struct PathBarView: View {
     @State private var suggestions: [PathSuggestion] = []
     @State private var highlightedIndex: Int?
     @State private var completionTask: Task<Void, Never>?
+    @State private var completionCancellation: PathCompletionCancellation?
+    @State private var completionGeneration = 0
 
     private var theme: ResolvedTheme { themeStore.resolved(for: colorScheme) }
 
@@ -39,9 +58,11 @@ struct PathBarView: View {
         .task(id: model.isEditingPath) {
             if model.isEditingPath {
                 try? await Task.sleep(nanoseconds: 40_000_000)
+                guard !Task.isCancelled else { return }
                 isFocused = true
                 scheduleSuggestions()
             } else {
+                cancelSuggestions()
                 isFocused = false
                 suggestions = []
                 highlightedIndex = nil
@@ -50,6 +71,7 @@ struct PathBarView: View {
         .onChange(of: model.pathDraft) { _, _ in
             scheduleSuggestions()
         }
+        .onDisappear { cancelSuggestions() }
     }
 
     private var pathBackground: some View {
@@ -268,8 +290,16 @@ struct PathBarView: View {
         return result
     }
 
-    private func scheduleSuggestions() {
+    private func cancelSuggestions() {
+        completionGeneration &+= 1
         completionTask?.cancel()
+        completionTask = nil
+        completionCancellation?.cancel()
+        completionCancellation = nil
+    }
+
+    private func scheduleSuggestions() {
+        cancelSuggestions()
         let draft = model.pathDraft
         guard model.isEditingPath, !draft.isEmpty else {
             suggestions = []
@@ -277,17 +307,32 @@ struct PathBarView: View {
             return
         }
 
+        let generation = completionGeneration
+        let cancellation = PathCompletionCancellation()
+        completionCancellation = cancellation
         completionTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 120_000_000)
             guard !Task.isCancelled else { return }
 
             let base = model.currentURL
             let home = model.home
-            let results = await Task.detached(priority: .userInitiated) {
-                PathCompleter.suggestions(for: draft, base: base, home: home)
-            }.value
+            let results = await withTaskCancellationHandler {
+                await Task.detached(priority: .userInitiated) {
+                    PathCompleter.suggestions(
+                        for: draft,
+                        base: base,
+                        home: home,
+                        isCancelled: { cancellation.isCancelled }
+                    )
+                }.value
+            } onCancel: {
+                cancellation.cancel()
+            }
 
-            guard !Task.isCancelled, model.pathDraft == draft else { return }
+            guard !Task.isCancelled,
+                  !cancellation.isCancelled,
+                  generation == completionGeneration,
+                  model.pathDraft == draft else { return }
             suggestions = results
             highlightedIndex = nil
         }

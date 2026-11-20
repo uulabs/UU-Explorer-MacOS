@@ -57,10 +57,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let target = URL(fileURLWithPath: rawPath).standardizedFileURL
-        guard FileManager.default.fileExists(atPath: target.path) else {
-            model?.showStatus("Couldn’t find “\(rawPath)”.", kind: .error)
-            return
-        }
         openExternal([target], reveal: false)
     }
 

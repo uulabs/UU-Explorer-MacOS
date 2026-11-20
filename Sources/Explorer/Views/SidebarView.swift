@@ -4,8 +4,10 @@ import SwiftUI
 
 struct SidebarView: View {
     @ObservedObject var model: ExplorerModel
+    @ObservedObject private var adb = ADBService.shared
     @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.colorScheme) private var colorScheme
+    @State private var favoriteTitles: [String: String] = [:]
 
     private var theme: ResolvedTheme { themeStore.resolved(for: colorScheme) }
 
@@ -21,7 +23,7 @@ struct SidebarView: View {
             }
             Rectangle().fill(theme.sidebarDivider).frame(height: 1)
             networkSection
-            if ADBService.shared.adbPath != nil {
+            if adb.adbPath != nil {
                 Rectangle().fill(theme.sidebarDivider).frame(height: 1)
                 androidSection
             }
@@ -30,6 +32,20 @@ struct SidebarView: View {
             treeSection
         }
         .background(theme.sidebar)
+        .task {
+            await adb.discoverADBIfNeeded()
+        }
+        .task(id: model.favorites.map(\.path)) {
+            let favorites = model.favorites
+            let titles = await Task.detached(priority: .utility) {
+                favorites.reduce(into: [String: String]()) { result, url in
+                    let name = FileManager.default.displayName(atPath: url.path)
+                    if !name.isEmpty { result[url.path] = name }
+                }
+            }.value
+            guard !Task.isCancelled else { return }
+            favoriteTitles = titles
+        }
     }
 
     private var networkSection: some View {
@@ -204,8 +220,8 @@ struct SidebarView: View {
     }
 
     private func favoriteTitle(_ url: URL) -> String {
-        let name = FileManager.default.displayName(atPath: url.path)
-        return name.isEmpty ? url.lastPathComponent : name
+        if let title = favoriteTitles[url.path], !title.isEmpty { return title }
+        return url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
     }
 
     private var quickAccessSection: some View {
@@ -277,6 +293,7 @@ struct SidebarView: View {
                                     Divider()
                                 }
                                 Button("Open in New Tab") { model.openInNewTab(row.url) }
+                                Button("New Folder") { model.beginNewFolder(in: row.url) }
                                 Button("Open in Terminal") { model.openInTerminal(row.url) }
                                 Button(model.isFavorite(row.url) ? "Remove from Favourites" : "Pin to Favourites") {
                                     model.toggleFavorite(row.url)
@@ -390,33 +407,29 @@ struct SidebarView: View {
         ]
 
         func append(
-            _ directory: FileManager.SearchPathDirectory,
+            _ directoryName: String,
             title: String,
             symbol: String,
             color: Color
         ) {
-            guard let url = FileManager.default.urls(for: directory, in: .userDomainMask).first,
-                  FileManager.default.fileExists(atPath: url.path) else { return }
+            let url = model.home.appendingPathComponent(directoryName, isDirectory: true).standardizedFileURL
             items.append(
-                QuickAccessItem(title: title, url: url.standardizedFileURL, symbol: symbol, color: color)
+                QuickAccessItem(title: title, url: url, symbol: symbol, color: color)
             )
         }
 
-        append(.desktopDirectory, title: "Desktop", symbol: "desktopcomputer", color: .teal)
-        append(.documentDirectory, title: "Documents", symbol: "doc.text.fill", color: .blue)
-        append(.downloadsDirectory, title: "Downloads", symbol: "arrow.down.circle.fill", color: .green)
-        let applications = URL(fileURLWithPath: "/Applications")
-        if FileManager.default.fileExists(atPath: applications.path) {
-            items.append(
-                QuickAccessItem(
-                    title: "Applications",
-                    url: applications,
-                    symbol: "square.grid.2x2.fill",
-                    color: .indigo
-                )
+        append("Desktop", title: "Desktop", symbol: "desktopcomputer", color: .teal)
+        append("Documents", title: "Documents", symbol: "doc.text.fill", color: .blue)
+        append("Downloads", title: "Downloads", symbol: "arrow.down.circle.fill", color: .green)
+        items.append(
+            QuickAccessItem(
+                title: "Applications",
+                url: URL(fileURLWithPath: "/Applications"),
+                symbol: "square.grid.2x2.fill",
+                color: .indigo
             )
-        }
-        append(.picturesDirectory, title: "Pictures", symbol: "photo.fill", color: .orange)
+        )
+        append("Pictures", title: "Pictures", symbol: "photo.fill", color: .orange)
         return items
     }
 }

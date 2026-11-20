@@ -27,7 +27,7 @@
 UU Explorer is a real AppKit/SwiftUI application, not a Finder skin. It brings the density and speed of a classic two-pane file manager to macOS without giving up native Quick Look, TCC-aware volume access, or macOS sharing and Open With integrations.
 
 - **Keyboard-first**: menu shortcuts, Space Quick Look, ⌘K command palette, and arrow-key gallery navigation.
-- **Built for large folders**: sortable details view, live filtering, recursive search, and on-demand folder sizing.
+- **Built for large folders**: background directory loading, filtering and sorting, bounded thumbnail decoding, recursive search, and on-demand folder sizing.
 - **Real file operations**: a cancellable byte-aware transfer queue with pause/resume, speed, ETA, optional SHA-256 verification, conflict choices, and undo/redo.
 - **Automation without a plugin runtime**: browse archives, define shell actions, copy paths in four formats, and open locations from the `uu` CLI or a URL scheme.
 - **Native integrations**: Quick Look, Open With, Share, Terminal, Trash, Finder reveal, and mounted volumes.
@@ -41,7 +41,7 @@ UU Explorer is a real AppKit/SwiftUI application, not a Finder skin. It brings t
 - **Tabs** with session restore, reopen-closed-tab, drag reordering, and per-tab history.
 - **Split view** with two independent browser panes and active-pane menu routing.
 - **Path bar** with parent folders, breadcrumbs, autocomplete, and a folder browser.
-- **Sidebar tree** for mounted volumes and lazy folder expansion, plus pinned Favourites.
+- **Sidebar tree** for mounted volumes and lazy folder expansion, pinned Favourites, and New Folder directly on any folder row.
 - **Quick Look** and an optional preview pane for images, folders, and supported documents.
 - **Drag and drop** into folder rows, sidebar destinations, gallery cards, and tabs.
 
@@ -65,13 +65,13 @@ UU Explorer is a real AppKit/SwiftUI application, not a Finder skin. It brings t
 - **Eject** external volumes and mounted disk images from the sidebar.
 - **Dual-pane F5/F6** copy and move between panes.
 - **Folder comparison sheet** for left-only, right-only, changed, and identical entries, with copy-left/right actions.
-- **Metadata inspector** for POSIX permissions, owner/group, hard links, xattrs, ACLs, symlinks, quarantine, image metadata, and streamed SHA-256.
+- **Metadata inspector** for POSIX permissions, owner/group, hard links, xattrs, ACLs, symlinks, quarantine, image metadata, and streamed SHA-256. Properties supports multiple selected items and calculates recursive folder totals only on demand.
 - **Custom details columns** for date created, size on disk, permissions, and owner, plus per-folder view/sort memory.
 - **Archive browser** with selective Open and Extract Selected, without unpacking unrelated files.
 - **Custom shell actions** with Selected Items or Current Folder scope, optional Terminal execution, and a persistent manager.
 - **Copy Path As** POSIX, File URL, shell-quoted, or JSON.
 - **`uu` CLI and `uu-explorer://` URL scheme** for opening folders and files from scripts, Shortcuts, or another app.
-- **Open With**, **Quick Actions**, and the system **Share** picker.
+- **Open With** loaded asynchronously without blocking context menus, **Quick Actions**, and the system **Share** picker.
 - **Compress**, **Extract Here/To…**, **RAR/7-Zip extraction**, and password-protected ZIP creation.
 - **Saved SMB/AFP/NFS shares** with a three-step setup wizard, optional reconnect at launch, and optional Launch at Login for persistence across restarts. Credentials stay in the macOS keychain.
 - **Command palette** for file, view, search, sizing, and settings actions.
@@ -228,7 +228,7 @@ Sources/ExplorerCore/        Testable filesystem, archive, search, sizing, and u
 Sources/Explorer/Model/      ExplorerModel, tabs, panes, undo, operation queue
 Sources/Explorer/Views/      AppKit table + SwiftUI shell, settings, palette, sheets
 Sources/Explorer/Support/    Window integration, Quick Look, updater, transfer session, sharing
-Tests/                       ExplorerCore unit tests
+Tests/                       ExplorerCore and app/model integration tests
 scripts/                     Portable app, DMG, release, test, and icon scripts
 ```
 
@@ -246,7 +246,7 @@ scripts/                     Portable app, DMG, release, test, and icon scripts
 swift test
 ```
 
-The repository includes 69 `ExplorerCore` tests covering path handling, sorting, archive round-trips, archive entry selection, search filters, folder comparison, batch rename planning, folder sizes, volume metadata, network address parsing, transfer byte accounting and verification, file hashing, and update release/checksum selection.
+The repository includes **107 tests**: 77 `ExplorerCore` tests and 30 app integration tests. Coverage includes path handling, sorting, archive round-trips and extraction ownership, search filters and cancellation, folder comparison, batch rename planning, folder sizes, volume metadata, network address parsing, transfer progress/cancellation and verification, thumbnails, asynchronous navigation and creation, multi-item Properties, file hashing, and update release/checksum selection.
 
 ## Security and privacy
 

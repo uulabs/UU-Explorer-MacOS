@@ -148,8 +148,10 @@ final class ExplorerMenuActions: NSObject, NSMenuItemValidation {
             menuItem.title = model.isPreviewPaneVisible ? "Hide Preview Pane" : "Show Preview Pane"
             menuItem.state = model.isPreviewPaneVisible ? .on : .off
             return canAct
-        case #selector(rename(_:)), #selector(properties(_:)):
+        case #selector(rename(_:)):
             return canAct && model.selection.count == 1
+        case #selector(properties(_:)):
+            return canAct && hasSelection
         case #selector(batchRename(_:)):
             return canAct && !model.selection.isEmpty
         case #selector(goBack(_:)):

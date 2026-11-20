@@ -60,21 +60,15 @@ struct NameEditorView: View {
     }
 
     private func subtitle(for editor: NameEditor) -> String {
+        let directory = editor.directory
+        let directoryName = directory.path == "/"
+            ? (model.volume?.name ?? model.currentFolderName)
+            : directory.lastPathComponent
         switch editor.mode {
         case .rename(let source):
-            let parent = source.deletingLastPathComponent()
-            let parentName = parent.path == "/"
-                ? (FileSystemServiceVolumeName.name(for: parent) ?? "Macintosh HD")
-                : parent.lastPathComponent
-            return "Rename “\(source.lastPathComponent)” in “\(parentName)”."
+            return "Rename “\(source.lastPathComponent)” in “\(directoryName)”."
         case .newFolder, .newFile:
-            return "Create in “\(model.currentFolderName)”."
+            return "Create in “\(directoryName)”."
         }
-    }
-}
-
-private enum FileSystemServiceVolumeName {
-    static func name(for url: URL) -> String? {
-        (try? url.resourceValues(forKeys: [.volumeNameKey]))?.volumeName
     }
 }

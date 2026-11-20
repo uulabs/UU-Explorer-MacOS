@@ -23,6 +23,11 @@ let package = Package(
             name: "ExplorerCoreTests",
             dependencies: ["ExplorerCore"],
             path: "Tests/ExplorerCoreTests"
+        ),
+        .testTarget(
+            name: "ExplorerTests",
+            dependencies: ["Explorer"],
+            path: "Tests/ExplorerTests"
         )
     ],
     swiftLanguageModes: [.v5]

@@ -39,6 +39,8 @@ final class TabManager: ObservableObject {
     private var closedTabs: [ExplorerTab] = []
     private var isRestoring = false
     private var waitsForSavedRestore = false
+    private var pendingRestores: Set<UUID> = []
+    private var unavailableTabs: Set<UUID> = []
     private var cancellables = Set<AnyCancellable>()
 
     init(model: ExplorerModel, restoreSession: Bool) {
@@ -48,15 +50,10 @@ final class TabManager: ObservableObject {
         self.persistsSession = restoreSession
 
         if restoreSession, let saved = Self.loadSession(from: defaults, key: sessionKey) {
-            let validTabs = saved.tabs.filter { tab in
-                var isDirectory: ObjCBool = false
-                return FileManager.default.fileExists(atPath: tab.state.path, isDirectory: &isDirectory)
-                    && isDirectory.boolValue
-            }
-            if !validTabs.isEmpty {
-                self.tabs = validTabs
-                self.activeTabID = validTabs.first(where: { $0.id == saved.activeID })?.id
-                    ?? validTabs[0].id
+            if !saved.tabs.isEmpty {
+                self.tabs = saved.tabs
+                self.activeTabID = saved.tabs.first(where: { $0.id == saved.activeID })?.id
+                    ?? saved.tabs[0].id
                 self.waitsForSavedRestore = true
             } else {
                 let initial = Self.tab(from: model)
@@ -74,6 +71,8 @@ final class TabManager: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 guard let self, !self.isRestoring, !self.waitsForSavedRestore else { return }
+                self.pendingRestores.remove(self.activeTabID)
+                self.unavailableTabs.remove(self.activeTabID)
                 self.captureActive()
                 self.save()
             }
@@ -92,9 +91,7 @@ final class TabManager: ObservableObject {
     func restoreOnLaunchIfNeeded() {
         if waitsForSavedRestore, let index = activeIndex {
             waitsForSavedRestore = false
-            isRestoring = true
-            model.restoreTabState(tabs[index].state)
-            isRestoring = false
+            restoreModel(tabs[index].state, for: tabs[index].id)
         } else {
             waitsForSavedRestore = false
             captureActive()
@@ -122,9 +119,7 @@ final class TabManager: ObservableObject {
         updated.insert(tab, at: insertion)
         tabs = updated
         activeTabID = tab.id
-        isRestoring = true
-        model.restoreTabState(state)
-        isRestoring = false
+        restoreModel(state, for: tab.id)
         save()
     }
 
@@ -132,9 +127,7 @@ final class TabManager: ObservableObject {
         guard id != activeTabID, let index = tabs.firstIndex(where: { $0.id == id }) else { return }
         captureActive()
         activeTabID = id
-        isRestoring = true
-        model.restoreTabState(tabs[index].state)
-        isRestoring = false
+        restoreModel(tabs[index].state, for: id)
         save()
     }
 
@@ -165,9 +158,7 @@ final class TabManager: ObservableObject {
         if id == activeTabID {
             let next = tabs[min(index, tabs.count - 1)]
             activeTabID = next.id
-            isRestoring = true
-            model.restoreTabState(next.state)
-            isRestoring = false
+            restoreModel(next.state, for: next.id)
         }
         save()
     }
@@ -180,9 +171,7 @@ final class TabManager: ObservableObject {
         tabs = updated
         let next = updated[min(index, updated.count - 1)]
         activeTabID = next.id
-        isRestoring = true
-        model.restoreTabState(next.state)
-        isRestoring = false
+        restoreModel(next.state, for: next.id)
         save()
         return detached
     }
@@ -193,9 +182,7 @@ final class TabManager: ObservableObject {
         updated[index].state = state
         updated[index].title = (state.path as NSString).lastPathComponent
         tabs = updated
-        isRestoring = true
-        model.restoreTabState(state)
-        isRestoring = false
+        restoreModel(state, for: activeTabID)
         save()
     }
 
@@ -207,9 +194,7 @@ final class TabManager: ObservableObject {
         updated.insert(closed, at: insertion)
         tabs = updated
         activeTabID = closed.id
-        isRestoring = true
-        model.restoreTabState(closed.state)
-        isRestoring = false
+        restoreModel(closed.state, for: closed.id)
         save()
     }
 
@@ -231,8 +216,29 @@ final class TabManager: ObservableObject {
         save()
     }
 
+    private func restoreModel(_ state: ExplorerTabState, for id: UUID) {
+        pendingRestores.insert(id)
+        isRestoring = true
+        model.restoreTabState(state) { [weak self] available in
+            guard let self else { return }
+            self.pendingRestores.remove(id)
+            if available {
+                self.unavailableTabs.remove(id)
+                if self.activeTabID == id {
+                    self.captureActive()
+                    self.save()
+                }
+            } else {
+                self.unavailableTabs.insert(id)
+            }
+        }
+        isRestoring = false
+    }
+
     private func captureActive() {
-        guard let index = activeIndex else { return }
+        guard let index = activeIndex,
+              !pendingRestores.contains(activeTabID),
+              !unavailableTabs.contains(activeTabID) else { return }
         var updated = tabs
         updated[index].state = model.captureTabState()
         updated[index].title = model.currentFolderName
@@ -260,7 +266,6 @@ final class TabManager: ObservableObject {
     }
 
     private func displayName(for url: URL) -> String {
-        let name = FileManager.default.displayName(atPath: url.path)
-        return name.isEmpty ? url.lastPathComponent : name
+        url.path == "/" ? "Macintosh HD" : url.lastPathComponent
     }
 }

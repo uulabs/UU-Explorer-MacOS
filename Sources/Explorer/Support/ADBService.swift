@@ -46,38 +46,63 @@ struct AndroidEntry: Identifiable, Equatable, Sendable {
 @MainActor
 final class ADBService: ObservableObject {
     static let shared = ADBService()
-    static let adbPathDefaultsKey = "UUExplorer.adbPath"
+    nonisolated static let adbPathDefaultsKey = "UUExplorer.adbPath"
 
     @Published private(set) var adbPath: String?
     @Published private(set) var devices: [AndroidDevice] = []
+    @Published private(set) var isRefreshingDevices = false
+    @Published private(set) var hasRefreshedDevices = false
+
+    private var deviceRefreshTask: Task<[AndroidDevice], Never>?
+    private var adbDiscoveryTask: Task<String?, Never>?
 
     private init() {
-        adbPath = Self.locateADB()
-    }
-
-    func refreshDevicesSync() -> [AndroidDevice] {
-        if adbPath == nil { adbPath = Self.locateADB() }
-        guard let path = adbPath else {
-            devices = []
-            return devices
-        }
-        let result = run(path, ["devices", "-l"], timeout: 1.5)
-        devices = Self.parseDevices(result.output)
-        return devices
+        adbPath = nil
     }
 
     func refreshDevices() async -> [AndroidDevice] {
-        if adbPath == nil { adbPath = Self.locateADB() }
-        guard let path = adbPath else {
-            devices = []
-            return []
+        if let deviceRefreshTask { return await deviceRefreshTask.value }
+
+        isRefreshingDevices = true
+        let task = Task { () -> [AndroidDevice] in
+            defer {
+                hasRefreshedDevices = true
+                isRefreshingDevices = false
+            }
+            guard let path = await self.discoverADBIfNeeded() else {
+                devices = []
+                return []
+            }
+            let result = await Task.detached(priority: .utility) {
+                Self.runStatic(path, ["devices", "-l"], timeout: 1.5)
+            }.value
+            let parsed = Self.parseDevices(result.output)
+            devices = parsed
+            return parsed
         }
-        let result = await Task.detached(priority: .utility) {
-            Self.runStatic(path, ["devices", "-l"], timeout: 1.5)
-        }.value
-        let parsed = Self.parseDevices(result.output)
-        devices = parsed
+        deviceRefreshTask = task
+        let parsed = await task.value
+        deviceRefreshTask = nil
         return parsed
+    }
+
+    @discardableResult
+    func discoverADBIfNeeded() async -> String? {
+        if let adbPath { return adbPath }
+        if let adbDiscoveryTask { return await adbDiscoveryTask.value }
+
+        let task = Task { () -> String? in
+            let discoveredPath = await Task.detached(priority: .utility) {
+                Self.locateADB()
+            }.value
+            if let adbPath { return adbPath }
+            adbPath = discoveredPath
+            return discoveredPath
+        }
+        adbDiscoveryTask = task
+        let path = await task.value
+        adbDiscoveryTask = nil
+        return path
     }
 
     func installAPK(_ apk: URL, on device: AndroidDevice, completion: @escaping (Result<String, Error>) -> Void) {
@@ -140,7 +165,7 @@ final class ADBService: ObservableObject {
         adbPath = url.path
     }
 
-    static func locateADB() -> String? {
+    nonisolated static func locateADB() -> String? {
         if let stored = UserDefaults.standard.string(forKey: adbPathDefaultsKey),
            FileManager.default.isExecutableFile(atPath: stored) {
             return stored
@@ -156,10 +181,6 @@ final class ADBService: ObservableObject {
             candidates.append(contentsOf: path.split(separator: ":").map { "\($0)/adb" })
         }
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
-    }
-
-    private func run(_ executable: String, _ arguments: [String], timeout: TimeInterval) -> (output: String, status: Int32) {
-        Self.runStatic(executable, arguments, timeout: timeout)
     }
 
     nonisolated private static func runStatic(

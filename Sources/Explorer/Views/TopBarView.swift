@@ -344,6 +344,8 @@ struct MoreMenu: View {
             }
             Button("Show in Finder") { model.revealSelectionInFinder() }
                 .disabled(model.selection.isEmpty)
+            Button("Properties…") { model.showProperties() }
+                .disabled(model.selection.isEmpty)
             Button("Open in Terminal") { model.openCurrentFolderInTerminal() }
             Button("Add Network Share…") { model.addNetworkLocation() }
             Button("Android Devices…") { model.showAndroidBrowser() }
@@ -356,26 +358,15 @@ struct MoreMenu: View {
             }
             if model.selection.count == 1 {
                 Button("Compress with Password…") { model.beginEncryptedCompression() }
-                if let item = model.selectedItems.first, ArchiveService.isArchive(item.url) {
+                if let item = model.selectedItems.first,
+                   !item.isDirectory,
+                   ArchiveService.format(for: item.url) != nil {
                     Button("Browse Archive…") { model.beginArchiveBrowsing() }
                 }
             }
             if let first = model.selectedItems.first {
-                let applications = model.openWithApplications(for: first.url)
-                if !applications.isEmpty {
-                    Menu("Open With") {
-                        ForEach(applications) { application in
-                            Button {
-                                model.openSelection(with: application.url)
-                            } label: {
-                                Label {
-                                    Text(application.name)
-                                } icon: {
-                                    Image(nsImage: application.icon)
-                                }
-                            }
-                        }
-                    }
+                OpenWithMenu(url: first.url) { application in
+                    model.openSelection(with: application)
                 }
                 Menu("Quick Actions") {
                     Button("Duplicate") { model.duplicateSelection() }

@@ -4,6 +4,7 @@ import Foundation
 final class SearchCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private var value = false
+    private var activeProcess: Process?
 
     var isCancelled: Bool {
         lock.lock()
@@ -11,10 +12,34 @@ final class SearchCancellation: @unchecked Sendable {
         return value
     }
 
+    func register(_ process: Process) {
+        lock.lock()
+        let shouldTerminate = value
+        if !shouldTerminate {
+            activeProcess = process
+        }
+        lock.unlock()
+        if shouldTerminate, process.isRunning {
+            process.terminate()
+        }
+    }
+
+    func unregister(_ process: Process) {
+        lock.lock()
+        if activeProcess === process {
+            activeProcess = nil
+        }
+        lock.unlock()
+    }
+
     func cancel() {
         lock.lock()
         value = true
+        let process = activeProcess
         lock.unlock()
+        if process?.isRunning == true {
+            process?.terminate()
+        }
     }
 }
 
@@ -46,7 +71,8 @@ enum SearchService {
                         query: trimmed,
                         filter: filter,
                         includeHidden: includeHidden,
-                        limit: limit
+                        limit: limit,
+                        cancellation: cancellation
                     )
                     guard !cancellation.isCancelled else {
                         continuation.finish()
@@ -97,44 +123,54 @@ enum SearchService {
         query: String,
         filter: SearchFilter,
         includeHidden: Bool,
-        limit: Int = 2_000
+        limit: Int = 2_000,
+        cancellation: SearchCancellation = SearchCancellation()
     ) async -> [FileItem] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty || filter.isActive else { return [] }
+        guard !cancellation.isCancelled, !trimmed.isEmpty || filter.isActive else { return [] }
 
         if !trimmed.isEmpty && (filter.textMode == .content || filter.textMode == .nameAndContent) {
-            let spotlight = await spotlightSearch(
+            let spotlight = spotlightSearch(
                 root: root,
                 query: trimmed,
                 includeHidden: includeHidden,
                 filter: filter,
-                limit: limit
+                limit: limit,
+                cancellation: cancellation
             )
+            guard !cancellation.isCancelled else { return [] }
             if filter.textMode == .content {
                 return spotlight
             }
-            let names = await Task.detached(priority: .userInitiated) {
-                FileSystemService.search(
-                    at: root,
-                    matching: trimmed,
-                    includeHidden: includeHidden,
-                    filter: filter,
-                    limit: limit
-                )
-            }.value
-            var seen = Set<String>()
-            return Array((names + spotlight).filter { seen.insert($0.id).inserted }.prefix(limit))
-        }
-
-        return await Task.detached(priority: .userInitiated) {
-            FileSystemService.search(
+            let names = FileSystemService.search(
                 at: root,
                 matching: trimmed,
                 includeHidden: includeHidden,
                 filter: filter,
-                limit: limit
+                limit: limit,
+                isCancelled: { cancellation.isCancelled }
             )
-        }.value
+            guard !cancellation.isCancelled else { return [] }
+            var seen = Set<String>()
+            var results: [FileItem] = []
+            for item in names + spotlight {
+                guard !cancellation.isCancelled else { return [] }
+                if seen.insert(item.id).inserted {
+                    results.append(item)
+                    if results.count >= limit { break }
+                }
+            }
+            return results
+        }
+
+        return FileSystemService.search(
+            at: root,
+            matching: trimmed,
+            includeHidden: includeHidden,
+            filter: filter,
+            limit: limit,
+            isCancelled: { cancellation.isCancelled }
+        )
     }
 
     private static func spotlightSearch(
@@ -142,24 +178,32 @@ enum SearchService {
         query: String,
         includeHidden: Bool,
         filter: SearchFilter,
-        limit: Int
-    ) async -> [FileItem] {
-        guard !query.isEmpty else { return [] }
-        let paths = await Task.detached(priority: .userInitiated) {
-            runMDFind(root: root, query: query, limit: limit)
-        }.value
-        guard !paths.isEmpty else { return [] }
+        limit: Int,
+        cancellation: SearchCancellation
+    ) -> [FileItem] {
+        guard !query.isEmpty, !cancellation.isCancelled else { return [] }
+        let paths = runMDFind(root: root, query: query, limit: limit, cancellation: cancellation)
+        guard !paths.isEmpty, !cancellation.isCancelled else { return [] }
 
-        return paths.compactMap { path -> FileItem? in
+        var items: [FileItem] = []
+        for path in paths {
+            guard !cancellation.isCancelled else { return [] }
             let url = URL(fileURLWithPath: path).standardizedFileURL
             guard let item = FileSystemService.fileItem(at: url, includeHidden: includeHidden),
                   !item.isDirectory,
-                  filter.matches(item) else { return nil }
-            return item
+                  filter.matches(item) else { continue }
+            items.append(item)
         }
+        return cancellation.isCancelled ? [] : items
     }
 
-    private static func runMDFind(root: URL, query: String, limit: Int) -> [String] {
+    private static func runMDFind(
+        root: URL,
+        query: String,
+        limit: Int,
+        cancellation: SearchCancellation
+    ) -> [String] {
+        guard limit > 0, !cancellation.isCancelled else { return [] }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
         process.arguments = ["-onlyin", root.path, query]
@@ -167,31 +211,33 @@ enum SearchService {
         let output = FileManager.default.temporaryDirectory
             .appendingPathComponent("uu-spotlight-\(UUID().uuidString).txt")
         FileManager.default.createFile(atPath: output.path, contents: nil)
+        defer { try? FileManager.default.removeItem(at: output) }
         guard let handle = try? FileHandle(forWritingTo: output) else { return [] }
         process.standardOutput = handle
         process.standardError = FileHandle.nullDevice
-        defer {
-            try? handle.close()
-            try? FileManager.default.removeItem(at: output)
-        }
+        defer { try? handle.close() }
 
         do {
+            guard !cancellation.isCancelled else { return [] }
             try process.run()
+            cancellation.register(process)
+            defer { cancellation.unregister(process) }
             process.waitUntilExit()
         } catch {
             return []
         }
-        guard process.terminationStatus == 0 else { return [] }
+        guard !cancellation.isCancelled, process.terminationStatus == 0 else { return [] }
         guard let data = try? Data(contentsOf: output),
               let text = String(data: data, encoding: .utf8) else { return [] }
         var seen = Set<String>()
         var paths: [String] = []
         for line in text.split(whereSeparator: \.isNewline) {
+            guard !cancellation.isCancelled else { return [] }
             let path = String(line)
             guard !path.isEmpty, seen.insert(path).inserted else { continue }
             paths.append(path)
             if paths.count >= limit { break }
         }
-        return paths
+        return cancellation.isCancelled ? [] : paths
     }
 }

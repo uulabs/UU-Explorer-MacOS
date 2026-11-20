@@ -77,6 +77,20 @@ final class FolderStatisticsTests: XCTestCase {
         XCTAssertFalse(result.isComplete)
     }
 
+    func testCancellationRetainsPartialTotalsWithoutReportingCompletion() throws {
+        let file = root.appendingPathComponent("file")
+        try Data(repeating: 1, count: 123).write(to: file)
+        var cancellationChecks = 0
+        let result = FolderStatistics.calculate(at: file, isCancelled: {
+            cancellationChecks += 1
+            return cancellationChecks > 1
+        })
+        XCTAssertEqual(result.fileCount, 1)
+        XCTAssertEqual(result.logicalBytes, 123)
+        XCTAssertTrue(result.isCancelled)
+        XCTAssertFalse(result.isComplete)
+    }
+
     func testMissingRootReportsIncompleteCoverage() {
         let result = FolderStatistics.calculate(at: root.appendingPathComponent("missing"))
         XCTAssertEqual(result.inaccessibleCount, 1)

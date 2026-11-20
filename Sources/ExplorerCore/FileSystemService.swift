@@ -321,16 +321,15 @@ public enum FileSystemService {
     public static func volumeInfo(for url: URL) -> VolumeInfo? {
         let keys: Set<URLResourceKey> = [
             .volumeNameKey,
+            .volumeURLKey,
             .volumeAvailableCapacityKey,
             .volumeTotalCapacityKey,
             .volumeIsInternalKey
         ]
         let target = url.standardizedFileURL
         guard let values = try? target.resourceValues(forKeys: keys) else { return nil }
-        let root = mountedVolumes()
-            .filter { PathTools.isDescendant(target, of: $0.url) }
-            .max { $0.url.path.count < $1.url.path.count }?
-            .url ?? URL(fileURLWithPath: "/")
+        let root = (values.allValues[.volumeURLKey] as? URL)?.standardizedFileURL
+            ?? URL(fileURLWithPath: "/")
         let name = values.volumeName ?? (root.path == "/" ? "Macintosh HD" : root.lastPathComponent)
         return VolumeInfo(
             name: name,

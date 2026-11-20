@@ -19,5 +19,22 @@ final class VolumeMetadataTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: folder) }
         XCTAssertNil(VolumeMetadata.load(for: folder))
         XCTAssertFalse(VolumeMetadata.isVolumeRoot(folder))
+        XCTAssertEqual(VolumeMetadata.resolve(for: folder), .notVolumeRoot)
+    }
+
+    func testKnownVolumeRootWithUnreadableMetadataIsUnavailable() {
+        let missingRoot = URL(fileURLWithPath: "/VolumeMetadataTests-\(UUID().uuidString)")
+        XCTAssertEqual(
+            VolumeMetadata.resolve(for: missingRoot, volumeRoots: [missingRoot]),
+            .unavailable
+        )
+    }
+
+    func testMetadataFailureIsDistinctFromNonRoot() {
+        let missingRoot = URL(fileURLWithPath: "/VolumeMetadataTests-\(UUID().uuidString)")
+        XCTAssertEqual(
+            VolumeMetadata.resolve(for: missingRoot, volumeRoots: []),
+            .notVolumeRoot
+        )
     }
 }

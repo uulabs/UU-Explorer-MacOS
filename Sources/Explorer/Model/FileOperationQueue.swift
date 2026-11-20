@@ -354,7 +354,7 @@ final class FileOperationQueue: ObservableObject {
                 }
             }
 
-            for (index, source) in sources.enumerated() {
+            sourceLoop: for (index, source) in sources.enumerated() {
                 if cancelledIDs.contains(job.id) {
                     wasCancelled = true
                     break
@@ -372,10 +372,27 @@ final class FileOperationQueue: ObservableObject {
                 }
 
                 var target = job.destination.appendingPathComponent(source.lastPathComponent)
-                if FileManager.default.fileExists(atPath: target.path) {
+                let targetExists = await Task.detached(priority: .utility) {
+                    FileManager.default.fileExists(atPath: target.path)
+                }.value
+                if cancelledIDs.contains(job.id) {
+                    wasCancelled = true
+                    break sourceLoop
+                }
+                if targetExists {
                     if target.standardizedFileURL.path == source.standardizedFileURL.path {
-                        target = FileName.uniqueDestination(for: source, in: job.destination, duplicate: false)
+                        target = await Task.detached(priority: .userInitiated) {
+                            FileName.uniqueDestination(for: source, in: job.destination, duplicate: false)
+                        }.value
+                        if cancelledIDs.contains(job.id) {
+                            wasCancelled = true
+                            break sourceLoop
+                        }
                     } else {
+                        if cancelledIDs.contains(job.id) {
+                            wasCancelled = true
+                            break sourceLoop
+                        }
                         let choice = await conflictChoice(for: job, source: source, destination: target)
                         if cancelledIDs.contains(job.id) {
                             wasCancelled = true
@@ -388,12 +405,22 @@ final class FileOperationQueue: ObservableObject {
                             update(job.id) { $0.completed += 1 }
                             continue
                         case .keepBoth:
-                            target = FileName.uniqueDestination(for: source, in: job.destination, duplicate: false)
+                            target = await Task.detached(priority: .userInitiated) {
+                                FileName.uniqueDestination(for: source, in: job.destination, duplicate: false)
+                            }.value
+                            if cancelledIDs.contains(job.id) {
+                                wasCancelled = true
+                                break sourceLoop
+                            }
                         case .replace:
                             do {
                                 _ = try await Task.detached(priority: .userInitiated) {
                                     try TrashService.recycle(target)
                                 }.value
+                                if cancelledIDs.contains(job.id) {
+                                    wasCancelled = true
+                                    break sourceLoop
+                                }
                             } catch {
                                 failures.append("\(target.lastPathComponent): \(error.localizedDescription)")
                                 completedBytes += sourceBytes[index]
@@ -406,7 +433,20 @@ final class FileOperationQueue: ObservableObject {
                 }
 
                 let isMove = job.kind == .move
-                let sameVolume = isMove && isSameVolume(source, target.deletingLastPathComponent())
+                var sameVolume = false
+                if isMove {
+                    sameVolume = await Task.detached(priority: .utility) {
+                        Self.isSameVolume(source, target.deletingLastPathComponent())
+                    }.value
+                    if cancelledIDs.contains(job.id) {
+                        wasCancelled = true
+                        break sourceLoop
+                    }
+                }
+                if cancelledIDs.contains(job.id) {
+                    wasCancelled = true
+                    break sourceLoop
+                }
                 if sameVolume {
                     do {
                         try await Task.detached(priority: .userInitiated) {
@@ -461,7 +501,9 @@ final class FileOperationQueue: ObservableObject {
 
                     if cancelledIDs.contains(job.id) {
                         wasCancelled = true
-                        try? FileManager.default.removeItem(at: target)
+                        try? await Task.detached(priority: .userInitiated) {
+                            try FileManager.default.removeItem(at: target)
+                        }.value
                         break
                     }
 
@@ -471,7 +513,9 @@ final class FileOperationQueue: ObservableObject {
                                 try FileManager.default.removeItem(at: source)
                             }.value
                         } catch {
-                            try? FileManager.default.removeItem(at: target)
+                            try? await Task.detached(priority: .userInitiated) {
+                                try FileManager.default.removeItem(at: target)
+                            }.value
                             throw error
                         }
                     }
@@ -482,7 +526,9 @@ final class FileOperationQueue: ObservableObject {
                     report(completedBytes)
                     update(job.id) { $0.completed += 1 }
                 } catch {
-                    try? FileManager.default.removeItem(at: target)
+                    try? await Task.detached(priority: .userInitiated) {
+                        try FileManager.default.removeItem(at: target)
+                    }.value
                     if let copyError = error as? TransferCopyError,
                        case .cancelled = copyError {
                         wasCancelled = true
@@ -547,7 +593,7 @@ final class FileOperationQueue: ObservableObject {
         }
     }
 
-    private func isSameVolume(_ source: URL, _ targetDirectory: URL) -> Bool {
+    private nonisolated static func isSameVolume(_ source: URL, _ targetDirectory: URL) -> Bool {
         var sourceStat = stat()
         var targetStat = stat()
         guard stat(source.path, &sourceStat) == 0,

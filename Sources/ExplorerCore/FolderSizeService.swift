@@ -28,6 +28,7 @@ public enum FolderSizeService {
             .isSymbolicLinkKey,
             .isRegularFileKey
         ]
+        let keySet = Set(keys)
         var bytes: Int64 = 0
         var allocated: Int64 = 0
         var files = 0
@@ -36,24 +37,37 @@ public enum FolderSizeService {
         guard let enumerator = FileManager.default.enumerator(
             at: directory,
             includingPropertiesForKeys: keys,
-            options: []
+            options: [],
+            errorHandler: { _, _ in true }
         ) else {
             return FolderSize(bytes: 0, allocatedBytes: 0, fileCount: 0, directoryCount: 0)
         }
 
-        for case let child as URL in enumerator {
-            if shouldCancel() { break }
-            guard let values = try? child.resourceValues(forKeys: Set(keys)) else { continue }
-            if values.isSymbolicLink == true { continue }
-            if values.isDirectory == true {
-                directories += 1
-                continue
+        var reachedEnd = false
+        while !reachedEnd && !shouldCancel() {
+            autoreleasepool {
+                for _ in 0..<128 {
+                    if shouldCancel() {
+                        reachedEnd = true
+                        break
+                    }
+                    guard let child = enumerator.nextObject() as? URL else {
+                        reachedEnd = true
+                        break
+                    }
+                    guard let values = try? child.resourceValues(forKeys: keySet) else { continue }
+                    if values.isSymbolicLink == true { continue }
+                    if values.isDirectory == true {
+                        directories += 1
+                        continue
+                    }
+                    guard values.isRegularFile == true else { continue }
+                    files += 1
+                    let size = Int64(values.fileSize ?? 0)
+                    bytes += size
+                    allocated += Int64(values.totalFileAllocatedSize ?? values.fileSize ?? 0)
+                }
             }
-            guard values.isRegularFile == true else { continue }
-            files += 1
-            let size = Int64(values.fileSize ?? 0)
-            bytes += size
-            allocated += Int64(values.totalFileAllocatedSize ?? values.fileSize ?? 0)
         }
 
         return FolderSize(

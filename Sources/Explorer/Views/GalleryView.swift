@@ -4,7 +4,7 @@ import SwiftUI
 
 struct GalleryView: View {
     @ObservedObject var model: ExplorerModel
-    @ObservedObject var thumbnails: ThumbnailStore
+    let thumbnails: ThumbnailStore
     @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.colorScheme) private var colorScheme
     @State private var selectionAnchor: String?
@@ -36,7 +36,7 @@ struct GalleryView: View {
                             GalleryCell(
                                 item: item,
                                 theme: theme,
-                                thumbnail: thumbnails.image(for: item),
+                                thumbnails: thumbnails,
                                 isSelected: model.selection.contains(item.id),
                                 isHovering: hoveredID == item.id
                             )
@@ -72,7 +72,7 @@ struct GalleryView: View {
                             .id(item.id)
                             .help(item.url.path)
                             .task(id: thumbnails.key(for: item)) {
-                                thumbnails.request(for: item)
+                                await thumbnails.request(for: item)
                             }
                             .accessibilityElement(children: .combine)
                             .accessibilityLabel(item.name)
@@ -198,6 +198,10 @@ struct GalleryView: View {
         }
     }
 
+    private func contextSelectionCount(for item: FileItem) -> Int {
+        model.selection.contains(item.id) ? model.selection.count : 1
+    }
+
     private func releaseTextFocus() {
         guard let window = NSApp.keyWindow,
               let responder = window.firstResponder,
@@ -280,52 +284,45 @@ struct GalleryView: View {
             prepareContextSelection(item)
             model.compressSelection()
         }
+        .disabled(contextSelectionCount(for: item) != 1)
         Button("Compress with Password…") {
-            model.selection = [item.id]
+            prepareContextSelection(item)
             model.beginEncryptedCompression()
         }
-        if ArchiveService.isArchive(item.url) {
+        .disabled(contextSelectionCount(for: item) != 1)
+        if !item.isDirectory, ArchiveService.format(for: item.url) != nil {
             Button("Browse Archive…") {
-                model.selection = [item.id]
+                prepareContextSelection(item)
                 model.beginArchiveBrowsing()
             }
+            .disabled(contextSelectionCount(for: item) != 1)
             Button("Extract Here") {
                 prepareContextSelection(item)
                 model.extractSelectionHere()
             }
+            .disabled(contextSelectionCount(for: item) != 1)
             Button("Extract To…") {
                 prepareContextSelection(item)
                 model.extractSelection()
             }
+            .disabled(contextSelectionCount(for: item) != 1)
         }
         Divider()
         Button("New Folder") { model.beginNewFolder() }
         Button("New File") { model.beginNewFile() }
         Divider()
         Button("Rename…") {
-            model.selection = [item.id]
+            prepareContextSelection(item)
             model.beginRenameSelected()
         }
+        .disabled(contextSelectionCount(for: item) != 1)
         Button("Batch Rename…") {
             prepareContextSelection(item)
             model.beginBatchRename()
         }
-        let applications = model.openWithApplications(for: item.url)
-        if !applications.isEmpty {
-            Menu("Open With") {
-                ForEach(applications) { application in
-                    Button {
-                        prepareContextSelection(item)
-                        model.openSelection(with: application.url)
-                    } label: {
-                        Label {
-                            Text(application.name)
-                        } icon: {
-                            Image(nsImage: application.icon)
-                        }
-                    }
-                }
-            }
+        OpenWithMenu(url: item.url) { application in
+            prepareContextSelection(item)
+            model.openSelection(with: application)
         }
         Menu("Quick Actions") {
             Button("Duplicate") {
@@ -352,7 +349,7 @@ struct GalleryView: View {
         }
         if item.isDirectory {
             Button("Calculate Size") {
-                model.selection = [item.id]
+                prepareContextSelection(item)
                 model.calculateSelectedFolderSizes()
             }
         }
@@ -365,7 +362,7 @@ struct GalleryView: View {
             model.forceDeleteSelection()
         }
         Button("Properties…") {
-            model.selection = [item.id]
+            prepareContextSelection(item)
             model.showProperties()
         }
         Divider()
@@ -378,9 +375,11 @@ struct GalleryView: View {
 private struct GalleryCell: View {
     let item: FileItem
     let theme: ResolvedTheme
-    let thumbnail: NSImage?
+    @ObservedObject var thumbnails: ThumbnailStore
     let isSelected: Bool
     let isHovering: Bool
+
+    private var thumbnail: NSImage? { thumbnails.image(for: item) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {

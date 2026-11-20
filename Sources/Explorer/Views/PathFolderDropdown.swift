@@ -46,12 +46,52 @@ private final class FolderBrowserModel: ObservableObject {
     @Published var expanded: Set<String>
     @Published var loading: Set<String> = []
     @Published var errors: [String: String] = [:]
+    @Published private(set) var preparedLabels: [String: String] = [:]
+    let parentFolders: [FolderBrowserNode]
     private var tasks: [String: Task<Void, Never>] = [:]
+    private var labelTask: Task<Void, Never>?
+    private var generation = 0
 
     init(rootURL: URL, includeHidden: Bool) {
         self.rootURL = rootURL.standardizedFileURL
         self.includeHidden = includeHidden
         self.expanded = [rootURL.standardizedFileURL.path]
+
+        var parents: [FolderBrowserNode] = []
+        var cursor = rootURL.standardizedFileURL
+        while parents.count < 6 {
+            let parent = cursor.deletingLastPathComponent().standardizedFileURL
+            if parent.path == cursor.path { break }
+            parents.append(FolderBrowserNode(url: parent, name: folderPathLabel(for: parent), depth: 0))
+            cursor = parent
+        }
+        self.parentFolders = parents
+    }
+
+    func label(for url: URL) -> String {
+        preparedLabels[url.path] ?? folderPathLabel(for: url)
+    }
+
+    func prepareLabels() {
+        guard labelTask == nil else { return }
+        let urls = ([rootURL] + parentFolders.map(\.url)).filter { preparedLabels[$0.path] == nil }
+        guard !urls.isEmpty else { return }
+        let generation = generation
+        labelTask = Task.detached(priority: .userInitiated) { [weak self] in
+            var labels: [String: String] = [:]
+            for url in urls {
+                guard !Task.isCancelled else { return }
+                labels[url.path] = preparedFolderLabel(for: url)
+            }
+            guard !Task.isCancelled else { return }
+            await self?.applyLabels(labels, generation: generation)
+        }
+    }
+
+    private func applyLabels(_ labels: [String: String], generation: Int) {
+        guard generation == self.generation else { return }
+        preparedLabels.merge(labels) { _, new in new }
+        labelTask = nil
     }
 
     func toggle(_ url: URL) {
@@ -89,12 +129,16 @@ private final class FolderBrowserModel: ObservableObject {
         errors = [:]
         expanded = [rootURL.path]
         load(rootURL)
+        prepareLabels()
     }
 
     func cancel() {
+        generation += 1
         tasks.values.forEach { $0.cancel() }
         tasks.removeAll()
         loading.removeAll()
+        labelTask?.cancel()
+        labelTask = nil
     }
 }
 
@@ -103,6 +147,18 @@ private struct FolderBrowserNode: Identifiable {
     let name: String
     let depth: Int
     var id: String { url.path }
+}
+
+private func folderPathLabel(for url: URL) -> String {
+    url.path == "/" ? "/" : url.lastPathComponent
+}
+
+private func preparedFolderLabel(for url: URL) -> String {
+    if url.path == "/" {
+        return FileSystemService.volumeInfo(for: url)?.name ?? folderPathLabel(for: url)
+    }
+    let name = FileManager.default.displayName(atPath: url.path)
+    return name.isEmpty ? folderPathLabel(for: url) : name
 }
 
 private struct PathFolderTree: View {
@@ -142,14 +198,14 @@ private struct PathFolderTree: View {
 
             ScrollView([.vertical, .horizontal]) {
                 LazyVStack(alignment: .leading, spacing: 1) {
-                    if !parentFolders.isEmpty {
+                    if !browser.parentFolders.isEmpty {
                         Text("PARENT FOLDERS")
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(theme.backgroundText.opacity(0.62))
                             .padding(.leading, 8)
                             .padding(.top, 5)
                             .padding(.bottom, 2)
-                        ForEach(parentFolders) { node in
+                        ForEach(browser.parentFolders) { node in
                             parentRow(node)
                         }
                         Rectangle()
@@ -198,32 +254,11 @@ private struct PathFolderTree: View {
         }
         .frame(width: 440)
         .background(theme.background)
-        .onAppear { browser.load(browser.rootURL) }
+        .onAppear {
+            browser.load(browser.rootURL)
+            browser.prepareLabels()
+        }
         .onDisappear { browser.cancel() }
-    }
-
-    private var parentFolders: [FolderBrowserNode] {
-        var result: [FolderBrowserNode] = []
-        var cursor = browser.rootURL.standardizedFileURL
-        while result.count < 6 {
-            let parent = cursor.deletingLastPathComponent().standardizedFileURL
-            if parent.path == cursor.path { break }
-            result.append(FolderBrowserNode(
-                url: parent,
-                name: displayName(for: parent),
-                depth: 0
-            ))
-            cursor = parent
-        }
-        return result
-    }
-
-    private func displayName(for url: URL) -> String {
-        if url.path == "/" {
-            return FileSystemService.volumeInfo(for: url)?.name ?? "Macintosh HD"
-        }
-        let name = FileManager.default.displayName(atPath: url.path)
-        return name.isEmpty ? url.lastPathComponent : name
     }
 
     private func parentRow(_ node: FolderBrowserNode) -> some View {
@@ -235,7 +270,7 @@ private struct PathFolderTree: View {
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(theme.accent)
                     .frame(width: 16)
-                Text(node.name)
+                Text(browser.label(for: node.url))
                     .font(.system(size: 12))
                     .foregroundStyle(theme.backgroundText)
                     .lineLimit(1)
@@ -251,7 +286,7 @@ private struct PathFolderTree: View {
         }
         .buttonStyle(.plain)
         .help(node.url.path)
-        .accessibilityLabel("Open parent folder \(node.name)")
+        .accessibilityLabel("Open parent folder \(browser.label(for: node.url))")
     }
 
     private func folderRow(_ node: FolderBrowserNode) -> some View {
@@ -301,7 +336,7 @@ private struct PathFolderTree: View {
                 append(child.url, name: child.name, depth: depth + 1)
             }
         }
-        append(browser.rootURL, name: FileManager.default.displayName(atPath: browser.rootURL.path), depth: 0)
+        append(browser.rootURL, name: browser.label(for: browser.rootURL), depth: 0)
         return result
     }
 }

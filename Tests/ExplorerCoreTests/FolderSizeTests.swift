@@ -43,6 +43,18 @@ final class FolderSizeTests: XCTestCase {
         XCTAssertLessThanOrEqual(calls, 1)
     }
 
+    func testTotalsAcrossEnumerationBatches() throws {
+        for index in 0..<300 {
+            try Data(repeating: 1, count: index % 7).write(
+                to: root.appendingPathComponent("\(index).bin")
+            )
+        }
+        let size = FolderSizeService.calculate(at: root)
+        XCTAssertEqual(size.fileCount, 300)
+        XCTAssertEqual(size.bytes, (0..<300).reduce(Int64(0)) { $0 + Int64($1 % 7) })
+        XCTAssertEqual(size.directoryCount, 0)
+    }
+
     func testEmptyFolder() {
         let size = FolderSizeService.calculate(at: root)
         XCTAssertEqual(size, FolderSize(bytes: 0, allocatedBytes: 0, fileCount: 0, directoryCount: 0))

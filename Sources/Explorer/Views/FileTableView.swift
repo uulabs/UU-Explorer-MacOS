@@ -252,6 +252,24 @@ private final class ExplorerTextCellView: NSTableCellView {
     }
 }
 
+private final class OpenWithMenuContext: NSObject {
+    let url: URL
+    var generation = 0
+
+    init(url: URL) {
+        self.url = url
+    }
+}
+
+private final class APKInstallMenuContext: NSObject {
+    let apk: URL
+    var generation = 0
+
+    init(apk: URL) {
+        self.apk = apk
+    }
+}
+
 struct FileTableView: NSViewRepresentable {
     @ObservedObject var model: ExplorerModel
     @EnvironmentObject private var themeStore: ThemeStore
@@ -340,7 +358,7 @@ struct FileTableView: NSViewRepresentable {
     }
 
     @MainActor
-    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
         var model: ExplorerModel
         weak var tableView: ExplorerTableView?
         private var items: [FileItem] = []
@@ -351,8 +369,11 @@ struct FileTableView: NSViewRepresentable {
         private var isFittingColumns = false
         private var theme: ResolvedTheme?
         private var lastThemeSignature: String?
-        private var lastFolderSizeSignature = ""
+        private var lastDisplayedItemsRevision = -1
+        private var lastFolderSizeRevision = -1
         private var lastColumnSignature = ""
+        private var openWithMenuContexts: [ObjectIdentifier: OpenWithMenuContext] = [:]
+        private var apkInstallMenuContexts: [ObjectIdentifier: APKInstallMenuContext] = [:]
         private let fallbackTheme = ResolvedTheme(settings: .default, mode: .light)
 
         init(model: ExplorerModel) {
@@ -402,16 +423,12 @@ struct FileTableView: NSViewRepresentable {
                 tableView.reloadData()
                 fitColumns()
             }
-            let newItems = model.displayedItems
-            let newIDs = newItems.map(\.id)
-            let oldIDs = items.map(\.id)
-
-            let sizeSignature = folderSizeSignature(for: model)
-            if newIDs != oldIDs {
+            if lastDisplayedItemsRevision != model.displayedItemsRevision {
                 let directoryChanged = lastDirectoryPath != model.currentURL.path
-                items = newItems
+                items = model.displayedItems
+                lastDisplayedItemsRevision = model.displayedItemsRevision
+                lastFolderSizeRevision = model.folderSizeRevision
                 lastDirectoryPath = model.currentURL.path
-                lastFolderSizeSignature = sizeSignature
                 tableView?.reloadData()
                 syncSelection(from: model.selection)
                 lastSelection = model.selection
@@ -423,8 +440,8 @@ struct FileTableView: NSViewRepresentable {
                 return
             }
 
-            if sizeSignature != lastFolderSizeSignature {
-                lastFolderSizeSignature = sizeSignature
+            if lastFolderSizeRevision != model.folderSizeRevision {
+                lastFolderSizeRevision = model.folderSizeRevision
                 tableView?.reloadData()
             }
 
@@ -434,15 +451,6 @@ struct FileTableView: NSViewRepresentable {
                 scrollSelectionIntoView()
             }
             updateSortDescriptors()
-        }
-
-        private func folderSizeSignature(for model: ExplorerModel) -> String {
-            let sizes = model.folderSizes
-                .map { "\($0.key)=\($0.value.bytes)" }
-                .sorted()
-                .joined(separator: "|")
-            let calculating = model.calculatingFolderPaths.sorted().joined(separator: ",")
-            return "\(sizes)#\(calculating)"
         }
 
         private func applyThemeIfNeeded(_ theme: ResolvedTheme) {
@@ -782,26 +790,7 @@ struct FileTableView: NSViewRepresentable {
                 let selectedCount = tableView?.selectedRowIndexes.count ?? 0
 
                 menu.addItem(menuItem("Open", action: #selector(menuOpen(_:))))
-                let applications = model.openWithApplications(for: items[row].url)
-                if !applications.isEmpty {
-                    let openWith = NSMenu()
-                    for application in applications {
-                        let appItem = NSMenuItem(
-                            title: application.name,
-                            action: #selector(menuOpenWithApplication(_:)),
-                            keyEquivalent: ""
-                        )
-                        appItem.target = self
-                        appItem.representedObject = application.url
-                        let icon = application.icon
-                        icon.size = NSSize(width: 16, height: 16)
-                        appItem.image = icon
-                        openWith.addItem(appItem)
-                    }
-                    let parent = NSMenuItem(title: "Open With", action: nil, keyEquivalent: "")
-                    parent.submenu = openWith
-                    menu.addItem(parent)
-                }
+                menu.addItem(makeOpenWithMenuItem(for: items[row].url))
                 if items[row].isDirectory {
                     menu.addItem(menuItem(
                         "Open in New Tab",
@@ -857,7 +846,7 @@ struct FileTableView: NSViewRepresentable {
                     action: #selector(menuEncryptedCompress(_:)),
                     enabled: selectedCount == 1
                 ))
-                if ArchiveService.isArchive(items[row].url) {
+                if !items[row].isDirectory, ArchiveService.format(for: items[row].url) != nil {
                     menu.addItem(menuItem(
                         "Browse Archive…",
                         action: #selector(menuBrowseArchive(_:)),
@@ -928,7 +917,7 @@ struct FileTableView: NSViewRepresentable {
                     menu.addItem(apkInstallMenuItem(for: items[row].url))
                 }
                 menu.addItem(.separator())
-                menu.addItem(menuItem("Properties…", action: #selector(menuProperties(_:)), enabled: selectedCount == 1))
+                menu.addItem(menuItem("Properties…", action: #selector(menuProperties(_:)), enabled: selectedCount > 0))
                 menu.addItem(.separator())
                 menu.addItem(menuItem("UU Explorer Settings…", action: #selector(menuSettings(_:))))
             } else {
@@ -967,59 +956,154 @@ struct FileTableView: NSViewRepresentable {
         @objc private func menuCurrentFolderProperties(_ sender: Any?) {
             PropertiesWindowController.show(for: model.currentURL)
         }
+
+        func menuWillOpen(_ menu: NSMenu) {
+            if let context = openWithMenuContext(for: menu, restoring: true) {
+                context.generation += 1
+                let generation = context.generation
+                populateOpenWithMenu(menu, context: context)
+                Task { [weak self, weak menu] in
+                    let applications = await OpenWithResolver.shared.loadApplications(for: context.url)
+                    guard let self, let menu,
+                          self.openWithMenuContexts[ObjectIdentifier(menu)] === context,
+                          context.generation == generation else { return }
+                    self.populateOpenWithMenu(menu, context: context, applications: applications)
+                }
+                return
+            }
+
+            if let context = apkInstallMenuContext(for: menu, restoring: true) {
+                context.generation += 1
+                let generation = context.generation
+                populateAPKInstallMenu(menu, context: context)
+                Task { [weak self, weak menu] in
+                    _ = await ADBService.shared.refreshDevices()
+                    guard let self, let menu,
+                          self.apkInstallMenuContexts[ObjectIdentifier(menu)] === context,
+                          context.generation == generation else { return }
+                    self.populateAPKInstallMenu(menu, context: context)
+                }
+            }
+        }
+
+        func menuDidClose(_ menu: NSMenu) {
+            let identifier = ObjectIdentifier(menu)
+            if let context = openWithMenuContexts.removeValue(forKey: identifier) {
+                context.generation += 1
+            }
+            if let context = apkInstallMenuContexts.removeValue(forKey: identifier) {
+                context.generation += 1
+            }
+        }
+
+        private func openWithMenuContext(for menu: NSMenu, restoring: Bool) -> OpenWithMenuContext? {
+            let identifier = ObjectIdentifier(menu)
+            if let context = openWithMenuContexts[identifier] { return context }
+            guard restoring,
+                  let parent = menu.supermenu?.items.first(where: { $0.submenu === menu }),
+                  let context = parent.representedObject as? OpenWithMenuContext else { return nil }
+            openWithMenuContexts[identifier] = context
+            return context
+        }
+
+        private func apkInstallMenuContext(for menu: NSMenu, restoring: Bool) -> APKInstallMenuContext? {
+            let identifier = ObjectIdentifier(menu)
+            if let context = apkInstallMenuContexts[identifier] { return context }
+            guard restoring,
+                  let parent = menu.supermenu?.items.first(where: { $0.submenu === menu }),
+                  let context = parent.representedObject as? APKInstallMenuContext else { return nil }
+            apkInstallMenuContexts[identifier] = context
+            return context
+        }
+
+        private func makeOpenWithMenuItem(for url: URL) -> NSMenuItem {
+            let openWith = NSMenu()
+            openWith.delegate = self
+            let context = OpenWithMenuContext(url: url)
+            populateOpenWithMenu(openWith, context: context)
+
+            let parent = NSMenuItem(title: "Open With", action: nil, keyEquivalent: "")
+            parent.submenu = openWith
+            parent.representedObject = context
+            return parent
+        }
+
+        private func populateOpenWithMenu(
+            _ menu: NSMenu,
+            context: OpenWithMenuContext,
+            applications: [OpenWithResolvedApplication]? = nil
+        ) {
+            menu.removeAllItems()
+            let applications = applications ?? OpenWithResolver.shared.cachedApplications(for: context.url)
+            guard let applications else {
+                let loading = NSMenuItem(title: "Loading Applications…", action: nil, keyEquivalent: "")
+                loading.isEnabled = false
+                menu.addItem(loading)
+                return
+            }
+            if applications.isEmpty {
+                let empty = NSMenuItem(title: "No Compatible Applications", action: nil, keyEquivalent: "")
+                empty.isEnabled = false
+                menu.addItem(empty)
+                return
+            }
+            for application in applications {
+                let item = menuItem(
+                    application.name,
+                    action: #selector(menuOpenWithApplication(_:)),
+                    representedObject: application.url
+                )
+                item.image = application.icon
+                menu.addItem(item)
+            }
+        }
+
+        private func populateAPKInstallMenu(_ menu: NSMenu, context: APKInstallMenuContext) {
+            menu.removeAllItems()
+            let adb = ADBService.shared
+            if adb.adbPath == nil {
+                let title = adb.isRefreshingDevices || !adb.hasRefreshedDevices
+                    ? "Locating ADB…"
+                    : "ADB Not Found"
+                let missing = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                missing.isEnabled = false
+                menu.addItem(missing)
+                menu.addItem(.separator())
+                menu.addItem(menuItem("Locate ADB…", action: #selector(menuLocateADB(_:))))
+                return
+            }
+
+            if adb.devices.isEmpty {
+                let title = adb.isRefreshingDevices || !adb.hasRefreshedDevices
+                    ? "Loading Android Devices…"
+                    : "No Android Devices"
+                let empty = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                empty.isEnabled = false
+                menu.addItem(empty)
+            } else {
+                for device in adb.devices {
+                    let item = menuItem(
+                        device.isReady ? device.displayName : "\(device.displayName) — \(device.state)",
+                        action: #selector(menuInstallAPK(_:)),
+                        enabled: device.isReady,
+                        representedObject: APKInstallTarget(apk: context.apk, serial: device.serial)
+                    )
+                    menu.addItem(item)
+                }
+            }
+            menu.addItem(.separator())
+            menu.addItem(menuItem("Refresh Devices", action: #selector(menuRefreshADB(_:))))
+        }
+
         private func apkInstallMenuItem(for apk: URL) -> NSMenuItem {
             let install = NSMenu()
-            let adb = ADBService.shared
-            let devices = adb.refreshDevicesSync()
-
-            if adb.adbPath == nil {
-                let missing = NSMenuItem(title: "ADB Not Found", action: nil, keyEquivalent: "")
-                missing.isEnabled = false
-                install.addItem(missing)
-                install.addItem(.separator())
-                let locate = NSMenuItem(
-                    title: "Locate ADB…",
-                    action: #selector(menuLocateADB(_:)),
-                    keyEquivalent: ""
-                )
-                locate.target = self
-                install.addItem(locate)
-            } else if devices.isEmpty {
-                let empty = NSMenuItem(title: "No Android Devices", action: nil, keyEquivalent: "")
-                empty.isEnabled = false
-                install.addItem(empty)
-                install.addItem(.separator())
-                let refresh = NSMenuItem(
-                    title: "Refresh Devices",
-                    action: #selector(menuRefreshADB(_:)),
-                    keyEquivalent: ""
-                )
-                refresh.target = self
-                install.addItem(refresh)
-            } else {
-                for device in devices {
-                    let item = NSMenuItem(
-                        title: device.isReady ? device.displayName : "\(device.displayName) — \(device.state)",
-                        action: #selector(menuInstallAPK(_:)),
-                        keyEquivalent: ""
-                    )
-                    item.target = self
-                    item.representedObject = APKInstallTarget(apk: apk, serial: device.serial)
-                    item.isEnabled = device.isReady
-                    install.addItem(item)
-                }
-                install.addItem(.separator())
-                let refresh = NSMenuItem(
-                    title: "Refresh Devices",
-                    action: #selector(menuRefreshADB(_:)),
-                    keyEquivalent: ""
-                )
-                refresh.target = self
-                install.addItem(refresh)
-            }
+            install.delegate = self
+            let context = APKInstallMenuContext(apk: apk)
+            populateAPKInstallMenu(install, context: context)
 
             let parent = NSMenuItem(title: "Install APK on Device", action: nil, keyEquivalent: "")
             parent.submenu = install
+            parent.representedObject = context
             return parent
         }
 
@@ -1044,12 +1128,14 @@ struct FileTableView: NSViewRepresentable {
         }
 
         @objc private func menuRefreshADB(_ sender: Any?) {
-            let devices = ADBService.shared.refreshDevicesSync()
-            model.showStatus(
-                devices.isEmpty
-                    ? "No Android devices found"
-                    : "\(devices.count) Android device\(devices.count == 1 ? "" : "s") connected"
-            )
+            Task { [weak self] in
+                let devices = await ADBService.shared.refreshDevices()
+                self?.model.showStatus(
+                    devices.isEmpty
+                        ? "No Android devices found"
+                        : "\(devices.count) Android device\(devices.count == 1 ? "" : "s") connected"
+                )
+            }
         }
 
         @objc private func menuLocateADB(_ sender: Any?) {

@@ -5,7 +5,7 @@ import SwiftUI
 
 struct PreviewPaneView: View {
     @ObservedObject var model: ExplorerModel
-    @ObservedObject var thumbnails: ThumbnailStore
+    let thumbnails: ThumbnailStore
     @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.colorScheme) private var colorScheme
 
@@ -122,7 +122,7 @@ private struct PreviewImage: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.contentField.opacity(0.35))
         .task(id: thumbnails.key(for: item)) {
-            thumbnails.request(for: item)
+            await thumbnails.request(for: item)
         }
     }
 }

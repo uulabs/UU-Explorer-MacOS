@@ -113,15 +113,23 @@ struct StatusBarView: View {
             }
             .help(item.url.path)
         } else {
+            let summary = selected.reduce(into: (files: 0, folders: 0, bytes: Int64(0))) { summary, item in
+                if item.isDirectory {
+                    summary.folders += 1
+                } else {
+                    summary.files += 1
+                    summary.bytes += item.byteSize ?? 0
+                }
+            }
             HStack(spacing: 5) {
                 Text("\(selected.count) items selected")
                     .foregroundStyle(theme.toolbarSecondary)
                 Text("·")
                     .foregroundStyle(theme.toolbarText.opacity(0.4))
-                Text(selectionBreakdown)
+                Text(selectionBreakdown(files: summary.files, folders: summary.folders))
                 Text("·")
                     .foregroundStyle(theme.toolbarText.opacity(0.4))
-                Text(ByteFormat.string(model.selectedByteCount))
+                Text(ByteFormat.string(summary.bytes))
                     .fontWeight(.semibold)
                     .monospacedDigit()
             }
@@ -151,9 +159,7 @@ struct StatusBarView: View {
         return item.url.path
     }
 
-    private var selectionBreakdown: String {
-        let files = model.selectedFileCount
-        let folders = model.selectedFolderCount
+    private func selectionBreakdown(files: Int, folders: Int) -> String {
         if files > 0 && folders > 0 {
             return "\(files) \(files == 1 ? "file" : "files"), \(folders) \(folders == 1 ? "folder" : "folders")"
         }

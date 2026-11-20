@@ -29,8 +29,11 @@ public enum PathCompleter {
         base: URL,
         home: URL = FileManager.default.homeDirectoryForCurrentUser,
         limit: Int = 8,
-        parentLimit: Int = 5
+        parentLimit: Int = 5,
+        scanLimit: Int = 4_096,
+        isCancelled: () -> Bool = { false }
     ) -> [PathSuggestion] {
+        guard !isCancelled() else { return [] }
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
 
@@ -52,12 +55,13 @@ public enum PathCompleter {
             prefix = trimmed
         }
 
-        guard let directory, FileSystemService.directoryExists(at: directory) else { return [] }
+        guard let directory, !isCancelled(), FileSystemService.directoryExists(at: directory) else { return [] }
 
         var parents: [PathSuggestion] = []
         var cursor = directory.standardizedFileURL
         var depth = 0
-        while depth < parentLimit {
+        while depth < max(0, parentLimit) {
+            guard !isCancelled() else { return [] }
             let parent = cursor.deletingLastPathComponent().standardizedFileURL
             if parent.path == cursor.path { break }
             parents.append(
@@ -72,11 +76,13 @@ public enum PathCompleter {
             depth += 1
         }
 
+        guard !isCancelled() else { return [] }
+        guard limit > 0, scanLimit > 0 else { return parents }
         let keys: Set<URLResourceKey> = [.isDirectoryKey, .isHiddenKey]
-        guard let children = try? FileManager.default.contentsOfDirectory(
+        guard let children = FileManager.default.enumerator(
             at: directory,
             includingPropertiesForKeys: Array(keys),
-            options: []
+            options: [.skipsSubdirectoryDescendants]
         ) else {
             return parents
         }
@@ -84,9 +90,12 @@ public enum PathCompleter {
         let loweredPrefix = prefix.lowercased()
         let showHidden = prefix.hasPrefix(".")
         var suggestions: [PathSuggestion] = []
+        var scanned = 0
 
-        for child in children {
-            guard suggestions.count < limit * 4 else { break }
+        for case let child as URL in children {
+            guard !isCancelled() else { return [] }
+            guard scanned < scanLimit else { break }
+            scanned += 1
             let name = child.lastPathComponent
             let values = try? child.resourceValues(forKeys: keys)
             let hidden = (values?.isHidden ?? false) || name.hasPrefix(".")
@@ -101,6 +110,7 @@ public enum PathCompleter {
             )
         }
 
+        guard !isCancelled() else { return [] }
         suggestions.sort { lhs, rhs in
             if lhs.isDirectory != rhs.isDirectory { return lhs.isDirectory }
             return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending

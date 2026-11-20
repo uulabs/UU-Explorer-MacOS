@@ -56,10 +56,32 @@ final class PropertiesWindowController: NSWindowController, NSWindowDelegate {
     }
 }
 
-private struct MetadataRow: Identifiable {
+private struct MetadataRow: Identifiable, Sendable {
     let id = UUID()
     let title: String
     let value: String
+}
+
+private struct PropertiesSnapshot: Sendable {
+    var created: Date?
+    var modified: Date?
+    var kind: String
+    var access: String
+    var volumeResult: VolumeMetadata.LoadResult
+    var permissions: String
+    var owner: String
+    var group: String
+    var hardLinkCount: Int
+    var typeIdentifier: String
+    var symlinkTarget: String?
+    var extendedAttributes: [String]
+    var acl: [String]
+    var imageMetadata: [MetadataRow]
+    var isDirectory: Bool
+}
+
+private struct IconBox: @unchecked Sendable {
+    let image: NSImage
 }
 
 @MainActor
@@ -68,9 +90,11 @@ private final class PropertiesModel: ObservableObject {
     @Published var statistics = FolderStatistics()
     @Published var created: Date?
     @Published var modified: Date?
-    @Published var kind = "Folder"
+    @Published var kind = "Loading…"
     @Published var access = "—"
     @Published var volume: VolumeMetadata?
+    @Published var volumeMetadataUnavailable = false
+    @Published var isKnownVolumeRoot = false
     @Published var permissions = "—"
     @Published var owner = "—"
     @Published var group = "—"
@@ -81,10 +105,19 @@ private final class PropertiesModel: ObservableObject {
     @Published var acl: [String] = []
     @Published var imageMetadata: [MetadataRow] = []
     @Published var isQuarantined = false
+    @Published var isDirectory = false
+    @Published var isMetadataLoaded = false
+    @Published var icon: NSImage?
     @Published var checksum: String?
     @Published var checksumState = ChecksumState.idle
+    @Published var isCalculating = false
+    @Published var calculationTaskActive = false
+    private var loadTask: Task<Void, Never>?
+    private var iconTask: Task<Void, Never>?
     private var scan: Task<Void, Never>?
     private var checksumTask: Task<Void, Never>?
+    private var generation = 0
+    private var scanGeneration = 0
 
     enum ChecksumState {
         case idle
@@ -94,36 +127,80 @@ private final class PropertiesModel: ObservableObject {
 
     init(url: URL) { self.url = url }
 
-    private func loadMetadata() {
+    var canCalculate: Bool {
+        isMetadataLoaded && !isKnownVolumeRoot && !calculationTaskActive
+    }
+
+    nonisolated private static func snapshot(for url: URL) -> PropertiesSnapshot {
         let manager = FileManager.default
         let attributes = try? manager.attributesOfItem(atPath: url.path)
-        if let mode = attributes?[.posixPermissions] as? NSNumber {
-            permissions = String(format: "%03o", mode.intValue)
-        }
-        owner = attributes?[.ownerAccountName] as? String ?? "—"
-        group = attributes?[.groupOwnerAccountName] as? String ?? "—"
-        hardLinkCount = Int(attributes?[.referenceCount] as? UInt ?? 0)
+        let permissions = (attributes?[.posixPermissions] as? NSNumber).map {
+            String(format: "%03o", $0.intValue)
+        } ?? "—"
+        let owner = attributes?[.ownerAccountName] as? String ?? "—"
+        let group = attributes?[.groupOwnerAccountName] as? String ?? "—"
+        var hardLinkCount = (attributes?[.referenceCount] as? NSNumber)?.intValue ?? 0
 
         var info = stat()
         if stat(url.path, &info) == 0 {
             hardLinkCount = Int(info.st_nlink)
         }
 
-        let resourceValues = try? url.resourceValues(forKeys: [.typeIdentifierKey, .isSymbolicLinkKey])
-        if let identifier = resourceValues?.typeIdentifier {
-            typeIdentifier = UTType(identifier)?.localizedDescription ?? identifier
-        }
-        if resourceValues?.isSymbolicLink == true {
-            symlinkTarget = try? manager.destinationOfSymbolicLink(atPath: url.path)
+        let values = try? url.resourceValues(forKeys: [
+            .creationDateKey,
+            .contentModificationDateKey,
+            .isDirectoryKey,
+            .isSymbolicLinkKey,
+            .typeIdentifierKey
+        ])
+        let typeIdentifier = values?.typeIdentifier.map {
+            UTType($0)?.localizedDescription ?? $0
+        } ?? "—"
+        let symlinkTarget = values?.isSymbolicLink == true
+            ? try? manager.destinationOfSymbolicLink(atPath: url.path)
+            : nil
+        let extendedAttributes = extendedAttributeNames(for: url)
+        let volumeResult = VolumeMetadata.resolve(for: url)
+        let kind: String
+        let access: String
+        switch volumeResult {
+        case .loaded(let volume):
+            kind = volume.format
+            access = volume.isReadOnly
+                ? "Read only"
+                : (manager.isWritableFile(atPath: url.path) ? "Read & write" : "Read only")
+        case .unavailable:
+            kind = "Volume"
+            access = "Unavailable"
+        case .notVolumeRoot:
+            kind = values?.isSymbolicLink == true
+                ? "Symbolic link"
+                : (values?.isDirectory == true ? "Folder" : "File")
+            access = manager.isReadableFile(atPath: url.path)
+                ? (manager.isWritableFile(atPath: url.path) ? "Read & write" : "Read only")
+                : "No read access"
         }
 
-        extendedAttributes = extendedAttributeNames()
-        isQuarantined = extendedAttributes.contains("com.apple.quarantine")
-        acl = accessControlEntries()
-        imageMetadata = imageProperties()
+        return PropertiesSnapshot(
+            created: values?.creationDate,
+            modified: values?.contentModificationDate,
+            kind: kind,
+            access: access,
+            volumeResult: volumeResult,
+            permissions: permissions,
+            owner: owner,
+            group: group,
+            hardLinkCount: hardLinkCount,
+            typeIdentifier: typeIdentifier,
+            symlinkTarget: symlinkTarget,
+            extendedAttributes: extendedAttributes,
+            acl: accessControlEntries(for: url),
+            imageMetadata: imageProperties(for: url),
+            isDirectory: values?.isDirectory == true
+        )
     }
 
-    private func extendedAttributeNames() -> [String] {
+    nonisolated private static func extendedAttributeNames(for url: URL) -> [String] {
         let size = listxattr(url.path, nil, 0, 0)
         guard size > 0 else { return [] }
         var buffer = [CChar](repeating: 0, count: size)
@@ -136,21 +213,12 @@ private final class PropertiesModel: ObservableObject {
             .filter { !$0.isEmpty }
     }
 
-    private func accessControlEntries() -> [String] {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/ls")
-        process.arguments = ["-led", url.path]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch { return [] }
-        guard let text = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) else {
-            return []
-        }
-        return text.split(whereSeparator: \.isNewline)
+    nonisolated private static func accessControlEntries(for url: URL) -> [String] {
+        guard let acl = acl_get_file(url.path, ACL_TYPE_EXTENDED) else { return [] }
+        defer { acl_free(UnsafeMutableRawPointer(acl)) }
+        guard let text = acl_to_text(acl, nil) else { return [] }
+        defer { acl_free(text) }
+        return String(cString: text).split(whereSeparator: \.isNewline)
             .map(String.init)
             .filter { line in
                 guard let range = line.range(of: #"^\s*\d+:\s"#, options: .regularExpression) else { return false }
@@ -158,7 +226,7 @@ private final class PropertiesModel: ObservableObject {
             }
     }
 
-    private func imageProperties() -> [MetadataRow] {
+    nonisolated private static func imageProperties(for url: URL) -> [MetadataRow] {
         guard let type = try? url.resourceValues(forKeys: [.typeIdentifierKey]).typeIdentifier,
               UTType(type)?.conforms(to: .image) == true,
               let source = CGImageSourceCreateWithURL(url as CFURL, nil),
@@ -191,56 +259,62 @@ private final class PropertiesModel: ObservableObject {
         return rows
     }
 
+    private func apply(_ snapshot: PropertiesSnapshot) {
+        created = snapshot.created
+        modified = snapshot.modified
+        kind = snapshot.kind
+        access = snapshot.access
+        permissions = snapshot.permissions
+        owner = snapshot.owner
+        group = snapshot.group
+        hardLinkCount = snapshot.hardLinkCount
+        typeIdentifier = snapshot.typeIdentifier
+        symlinkTarget = snapshot.symlinkTarget
+        extendedAttributes = snapshot.extendedAttributes
+        isQuarantined = snapshot.extendedAttributes.contains("com.apple.quarantine")
+        acl = snapshot.acl
+        imageMetadata = snapshot.imageMetadata
+        isDirectory = snapshot.isDirectory
+        switch snapshot.volumeResult {
+        case .loaded(let metadata):
+            volume = metadata
+            isKnownVolumeRoot = true
+        case .unavailable:
+            volumeMetadataUnavailable = true
+            isKnownVolumeRoot = true
+        case .notVolumeRoot:
+            break
+        }
+        isMetadataLoaded = true
+    }
+
     func calculateChecksum() {
-        guard !isDirectory else { return }
+        guard isMetadataLoaded, !isDirectory, !isKnownVolumeRoot else { return }
         checksumTask?.cancel()
         checksumState = .calculating
         checksum = nil
         let url = url
+        let request = generation
         checksumTask = Task { [weak self] in
             let value = await Task.detached(priority: .utility) {
                 FileHasher.sha256(at: url)
             }.value
-            guard !Task.isCancelled else { return }
-            self?.checksum = value
-            self?.checksumState = value == nil ? .failed : .idle
+            guard !Task.isCancelled, let self, self.generation == request else { return }
+            self.checksum = value
+            self.checksumState = value == nil ? .failed : .idle
         }
     }
 
-    var isDirectory: Bool {
-        (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-    }
-
-    func refresh() {
-        scan?.cancel()
-        checksumTask?.cancel()
-        statistics = FolderStatistics()
-        volume = nil
-        checksum = nil
-        checksumState = .idle
-        loadMetadata()
-
-        let values = try? url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey,
-                                                      .isDirectoryKey, .isSymbolicLinkKey])
-        created = values?.creationDate
-        modified = values?.contentModificationDate
-        let manager = FileManager.default
-
-        if let volume = VolumeMetadata.load(for: url) {
-            self.volume = volume
-            kind = volume.format
-            access = volume.isReadOnly
-                ? "Read only"
-                : (manager.isWritableFile(atPath: url.path) ? "Read & write" : "Read only")
-            return
-        }
-
-        kind = values?.isSymbolicLink == true ? "Symbolic link" : (values?.isDirectory == true ? "Folder" : "File")
-        access = manager.isReadableFile(atPath: url.path)
-            ? (manager.isWritableFile(atPath: url.path) ? "Read & write" : "Read only") : "No read access"
+    func calculateTotals() {
+        guard canCalculate else { return }
+        scanGeneration += 1
+        let request = scanGeneration
         let target = url
+        statistics = FolderStatistics()
+        isCalculating = true
+        calculationTaskActive = true
         scan = Task { [weak self] in
-            let updates = AsyncStream<FolderStatistics> { continuation in
+            let updates = AsyncStream<FolderStatistics>(bufferingPolicy: .bufferingNewest(1)) { continuation in
                 let worker = Task.detached(priority: .utility) {
                     let result = FolderStatistics.calculate(at: target, isCancelled: { Task.isCancelled }) {
                         continuation.yield($0)
@@ -252,15 +326,83 @@ private final class PropertiesModel: ObservableObject {
             }
             for await update in updates {
                 guard !Task.isCancelled else { break }
-                self?.statistics = update
+                guard let self, self.scanGeneration == request else { break }
+                self.statistics = update
+            }
+            guard let self else { return }
+            self.scan = nil
+            self.calculationTaskActive = false
+            if self.scanGeneration == request {
+                self.isCalculating = false
             }
         }
     }
 
-    func cancel() {
+    func stopCalculation() {
+        guard scan != nil else { return }
+        scanGeneration += 1
+        scan?.cancel()
+        isCalculating = false
+        if !statistics.isComplete { statistics.isCancelled = true }
+    }
+
+    func refresh() {
+        generation += 1
+        scanGeneration += 1
+        let request = generation
+        loadTask?.cancel()
+        iconTask?.cancel()
         scan?.cancel()
         checksumTask?.cancel()
-        if !statistics.isComplete { statistics.isCancelled = true }
+        statistics = FolderStatistics()
+        isCalculating = false
+        calculationTaskActive = scan != nil
+        volume = nil
+        volumeMetadataUnavailable = false
+        isKnownVolumeRoot = false
+        isMetadataLoaded = false
+        created = nil
+        modified = nil
+        kind = "Loading…"
+        access = "—"
+        permissions = "—"
+        owner = "—"
+        group = "—"
+        hardLinkCount = 0
+        typeIdentifier = "—"
+        symlinkTarget = nil
+        extendedAttributes = []
+        acl = []
+        imageMetadata = []
+        isQuarantined = false
+        isDirectory = false
+        icon = nil
+        checksum = nil
+        checksumState = .idle
+
+        let target = url
+        loadTask = Task { [weak self] in
+            let snapshot = await Task.detached(priority: .userInitiated) {
+                Self.snapshot(for: target)
+            }.value
+            guard !Task.isCancelled, let self, self.generation == request else { return }
+            self.apply(snapshot)
+        }
+        iconTask = Task { [weak self] in
+            let box = await Task.detached(priority: .userInitiated) {
+                IconBox(image: NSWorkspace.shared.icon(forFile: target.path))
+            }.value
+            guard !Task.isCancelled, let self, self.generation == request else { return }
+            self.icon = box.image
+        }
+    }
+
+    func cancel() {
+        generation += 1
+        loadTask?.cancel()
+        iconTask?.cancel()
+        checksumTask?.cancel()
+        stopCalculation()
     }
 }
 
@@ -269,8 +411,9 @@ private struct PropertiesView: View {
     let close: () -> Void
 
     private var totals: FolderStatistics { model.statistics }
-    private var running: Bool { model.volume == nil && !totals.isComplete && !totals.isCancelled }
-    private var partial: Bool { model.volume == nil && (totals.inaccessibleCount > 0 || totals.isCancelled) }
+    private var running: Bool { model.isCalculating }
+    private var hasCalculation: Bool { running || totals.isComplete || totals.isCancelled }
+    private var partial: Bool { hasCalculation && (totals.inaccessibleCount > 0 || totals.isCancelled) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -281,6 +424,8 @@ private struct PropertiesView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     if let volume = model.volume {
                         volumeBody(volume)
+                    } else if model.volumeMetadataUnavailable {
+                        volumeUnavailableBody
                     } else {
                         folderBody
                         metadataSection
@@ -299,15 +444,21 @@ private struct PropertiesView: View {
 
     private var header: some View {
         HStack(spacing: 16) {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: model.url.path))
-                .resizable().frame(width: 56, height: 56)
+            Group {
+                if let icon = model.icon {
+                    Image(nsImage: icon).resizable()
+                } else {
+                    Image(systemName: "doc").resizable().foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 56, height: 56)
             VStack(alignment: .leading, spacing: 5) {
                 Text(model.url.lastPathComponent.isEmpty ? "/" : model.url.lastPathComponent)
                     .font(.system(size: 22, weight: .semibold)).lineLimit(2)
                 Text(model.kind).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
-            Text(model.volume == nil ? "GENERAL" : "VOLUME")
+            Text(model.isKnownVolumeRoot ? "VOLUME" : "GENERAL")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary).padding(.horizontal, 10).padding(.vertical, 6)
                 .background(.quaternary, in: Capsule())
@@ -323,11 +474,13 @@ private struct PropertiesView: View {
                     .help(model.url.path)
             }
             HStack(spacing: 12) {
-                sizeCard("Size", bytes: totals.logicalBytes)
-                sizeCard("Size on disk", bytes: totals.allocatedBytes)
+                sizeCard("Size", bytes: hasCalculation ? totals.logicalBytes : nil)
+                sizeCard("Size on disk", bytes: hasCalculation ? totals.allocatedBytes : nil)
             }
             Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 13) {
-                detail("Contains", "\(totals.fileCount.formatted()) files, \(totals.folderCount.formatted()) folders")
+                detail("Contains", hasCalculation
+                    ? "\(totals.fileCount.formatted()) files, \(totals.folderCount.formatted()) folders"
+                    : "Not calculated")
                 if totals.symbolicLinkCount > 0 {
                     detail("Symbolic links", totals.symbolicLinkCount.formatted())
                 }
@@ -338,18 +491,33 @@ private struct PropertiesView: View {
             Divider()
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
-                    if running { ProgressView().controlSize(.small) }
-                    else { Image(systemName: partial ? "exclamationmark.circle" : "checkmark.circle.fill")
-                            .foregroundStyle(partial ? Color.orange : Color.green) }
-                    Text(running ? "Calculating folder contents…" : (partial ? "Partial totals" : "Calculation complete"))
-                        .font(.system(size: 12, weight: .medium))
+                    if running {
+                        ProgressView().controlSize(.small)
+                        Text("Calculating folder contents…")
+                    } else if hasCalculation {
+                        Image(systemName: partial ? "exclamationmark.circle" : "checkmark.circle.fill")
+                            .foregroundStyle(partial ? Color.orange : Color.green)
+                        Text(partial ? "Partial totals" : "Calculation complete")
+                    } else {
+                        Text("Folder totals are calculated only on request.")
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if !running {
+                        Button(totals.isComplete ? "Recalculate" : "Calculate") {
+                            model.calculateTotals()
+                        }
+                        .controlSize(.small)
+                        .disabled(!model.canCalculate)
+                    }
                 }
+                .font(.system(size: 12, weight: .medium))
                 if totals.inaccessibleCount > 0 {
                     Text("\(totals.inaccessibleCount.formatted()) items could not be read. Totals exclude inaccessible contents.")
                         .font(.system(size: 11)).foregroundStyle(.orange)
                 }
                 if totals.isCancelled {
-                    Text("Calculation stopped. Refresh to calculate again.")
+                    Text("Calculation stopped. The displayed totals are partial.")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
                 Text("Includes hidden files and package contents. Symbolic links are counted without following their targets.")
@@ -371,9 +539,9 @@ private struct PropertiesView: View {
                 detail("Permissions", model.permissions)
                 detail("Owner", model.owner)
                 detail("Group", model.group)
-                detail("Hard links", "\(model.hardLinkCount)")
+                detail("Hard links", model.isMetadataLoaded ? "\(model.hardLinkCount)" : "—")
                 detail("Type", model.typeIdentifier)
-                detail("Quarantine", model.isQuarantined ? "Yes" : "No")
+                detail("Quarantine", model.isMetadataLoaded ? (model.isQuarantined ? "Yes" : "No") : "—")
                 if let target = model.symlinkTarget {
                     detail("Symlink target", target)
                 }
@@ -436,6 +604,7 @@ private struct PropertiesView: View {
                         model.calculateChecksum()
                     }
                     .controlSize(.small)
+                    .disabled(!model.isMetadataLoaded)
                 }
             }
 
@@ -459,6 +628,24 @@ private struct PropertiesView: View {
                 Text("Couldn’t calculate a checksum for this item.")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.orange)
+            }
+        }
+    }
+
+    private var volumeUnavailableBody: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("Volume information unavailable", systemImage: "exclamationmark.triangle")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.orange)
+            Text("macOS could not provide metadata for this volume root. Recursive totals are not calculated when volume metadata cannot be read.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 13) {
+                detail("Mount point", model.url.path)
+                detail("Access", model.access)
+                detail("Created", date(model.created))
+                detail("Modified", date(model.modified))
             }
         }
     }
@@ -514,18 +701,18 @@ private struct PropertiesView: View {
                 NSPasteboard.general.setString(model.url.path, forType: .string)
             }
             Spacer()
-            if running { Button("Stop") { model.cancel() } }
+            if running { Button("Stop") { model.stopCalculation() } }
             Button("Refresh") { model.refresh() }
             Button("Close", action: close).keyboardShortcut(.defaultAction)
         }
     }
 
-    private func sizeCard(_ title: String, bytes: Int64) -> some View {
+    private func sizeCard(_ title: String, bytes: Int64?) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
             Text(ByteFormat.string(bytes)).font(.system(size: 25, weight: .semibold))
                 .monospacedDigit().foregroundStyle(running || partial ? Color.secondary : Color.primary)
-            Text(ByteFormat.exact(bytes)).font(.system(size: 10)).foregroundStyle(.secondary)
+            Text(bytes.map(ByteFormat.exact) ?? "Not calculated").font(.system(size: 10)).foregroundStyle(.secondary)
                 .textSelection(.enabled)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
